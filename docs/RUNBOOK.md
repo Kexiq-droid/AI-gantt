@@ -27,7 +27,7 @@
 
 ```bash
 cd /var/CRM_test && . .venv/bin/activate && PYTHONPATH=/var/CRM_test make seed
-# или кнопка «Сброс демо» в UI
+# или кнопка «Сбросить демо» в UI
 ```
 
 ## TLS / DNS

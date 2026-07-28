@@ -52,55 +52,61 @@ def main() -> int:
         # Ensure chat open
         chat_heading = page.get_by_role("heading", name="Чат с планом")
         if not chat_heading.is_visible():
-            page.get_by_role("button", name="Открыть чат с агентом").click()
+            open_chat = page.get_by_role("button", name=re.compile(r"Открыть чат с ассистентом|Ассистент"))
+            open_chat.first.click()
             chat_heading.wait_for()
         hold(page, 1.5)
 
-        # 2. Show seeded Gantt a bit
-        hold(page, 2.0)
+        # 2. Show seeded Gantt a bit (today line / bars)
+        hold(page, 2.5)
 
-        # 3. Import Excel
+        # 3. Import Excel via header control
         page.locator('input[type="file"][accept=".xlsx"]').set_input_files(str(XLSX))
         page.get_by_text("План импортирован").wait_for(timeout=30_000)
         hold(page, 2.5)
 
         # 4. Chat prompt
-        box = page.get_by_placeholder("Сообщение на естественном языке…")
+        box = page.get_by_placeholder("Напишите, что изменить в плане…")
         box.click()
         box.fill(PROMPT)
         hold(page, 1.0)
         page.get_by_role("button", name="Отправить").click()
-        page.get_by_text("Агент думает…").wait_for(timeout=15_000)
+        page.get_by_text("Ассистент думает…").wait_for(timeout=15_000)
 
-        # Wait for agent completion (busy indicator gone)
         try:
-            page.get_by_text("Агент думает…").wait_for(state="hidden", timeout=180_000)
+            page.get_by_text("Ассистент думает…").wait_for(state="hidden", timeout=180_000)
         except PlaywrightTimeout:
-            print("WARN: agent still busy after 180s", file=sys.stderr)
+            print("WARN: assistant still busy after 180s", file=sys.stderr)
 
-        hold(page, 3.0)
+        hold(page, 3.5)
 
-        # 5. Highlight already on chart — pause for viewers
+        # 5. Highlight pause
         hold(page, 2.5)
 
-        # 6. Undo (button label like "← Возврат (N)")
-        undo = page.get_by_role("button", name=re.compile(r"^← Возврат"))
-        if undo.count() and undo.first.is_enabled():
+        # 6. Undo
+        undo = page.get_by_role("button", name=re.compile(r"^← Отменить"))
+        if undo.count() and not undo.first.get_attribute("aria-disabled") == "true":
             undo.first.click()
             hold(page, 2.0)
+            page.get_by_text("Изменение отменено").wait_for(timeout=10_000)
+            hold(page, 1.5)
 
         # 7. Export Excel
         with page.expect_download(timeout=30_000) as dl_info:
-            page.get_by_role("button", name="Excel ↓").click()
+            page.get_by_role("button", name="Экспорт Excel").click()
         download = dl_info.value
         dest = OUT_DIR / (download.suggested_filename or "export.xlsx")
         download.save_as(str(dest))
         hold(page, 1.5)
 
-        # Optional brief journal peek
-        page.get_by_role("button", name="Журнал агента").click()
-        hold(page, 2.0)
+        # Brief journal peek
+        page.get_by_role("button", name="Журнал ассистента").click()
+        hold(page, 2.5)
         page.keyboard.press("Escape")
+        # journal closes on backdrop click; Escape may not — click outside
+        overlay = page.locator(".fixed.inset-0").filter(has_text="Журнал ассистента")
+        if overlay.count():
+            overlay.first.click(position={"x": 10, "y": 10})
         hold(page, 1.0)
 
         page.close()
@@ -114,7 +120,6 @@ def main() -> int:
     webm = videos[0]
     print(f"video: {webm} ({webm.stat().st_size} bytes)")
 
-    # Encode compact looping gif (~12fps, 960px wide, palette)
     palette = OUT_DIR / "palette.png"
     subprocess.run(
         [

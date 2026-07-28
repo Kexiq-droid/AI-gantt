@@ -51,7 +51,7 @@ BioPlan is an internal web app: open the page → see a seeded hierarchical Gant
 | P0.9 | **Graceful degradation:** без LLM работают Gantt/Excel/undo; чат — понятная ошибка (§6.7) |
 | P0.10 | **Инварианты плана + транзакционный** `apply_plan_patch` (§6.8) |
 | P0.11 | Корневой **Makefile** (`up` / `seed` / `test`) |
-| P0.12 | **Сброс демо-плана** (API + кнопка UI + `make seed`) |
+| P0.12 | **Сброс демо-плана** (API + кнопка «Сбросить демо» + `make seed`) |
 
 ### 2.2 P1 — повышает оценку
 
@@ -136,7 +136,7 @@ BioPlan is an internal web app: open the page → see a seeded hierarchical Gant
 
 **Как** разработчик / ревьюер, **хочу** видеть трассировку прогонов агента и простые метрики качества.
 
-**Acceptance:** для каждого job сохраняются prompt, tools, latency, validate, changes, error, model; UI «Журнал агента» со списком и деталями; видны агрегаты (% success, % validate fail, % undo после агента, avg latency); можно поставить 👍/👎 на ответ ассистента.
+**Acceptance:** для каждого job сохраняются prompt, tools, latency, validate, changes, error, model; UI «Журнал ассистента» со списком и деталями; видны агрегаты (% success, % validate fail, % undo после агента, avg latency); можно поставить 👍/👎 на ответ ассистента.
 
 ### US-10. Работа без LLM
 
@@ -392,7 +392,8 @@ Delete в UI/агенте — с подтверждением на фронте 
 
 ### 7.2 LLM
 
-- Default: **DeepSeek V4 Flash** (`deepseek-v4-flash`), OpenAI-compatible API `https://api.deepseek.com`.  
+- Default: **Timeweb Cloud AI** (`LLM_PROVIDER=timeweb`), OpenAI-compatible agent endpoint.  
+  Fallback: DeepSeek / OpenAI.   
 - Thinking mode: **выключен** в MVP.  
 - Fallback: `LLM_PROVIDER=openai` + модель из env (например `gpt-4o-mini`).  
 - System prompt + 3 few-shot на русском под BioPlan.  
@@ -518,7 +519,7 @@ Loading job, empty plan, ошибка LLM, Undo disabled (стек пуст), up
 | `undone_within_5m` | прокси «плохая правка» |
 | `rating` / `rating_comment` | ручная оценка ответа |
 
-**UI «Журнал агента»** (пункт в шапке или drawer, для залогиненных):
+**UI «Журнал ассистента»** (пункт в шапке или drawer, для залогиненных):
 
 1. Сводка метрик по текущему плану / всем своим job: % `done`, % validate fail, % undo-after-agent, avg latency.  
 2. Таблица прогонов: время, статус, model, latency, validate, undo?, rating.  
@@ -607,7 +608,7 @@ Loading job, empty plan, ошибка LLM, Undo disabled (стек пуст), up
 - [ ] Excel sample в репо; import/export работают  
 - [ ] MCP реален; в README — как подключить из Cursor  
 - [ ] Переключение light/dark темы работает и переживает reload  
-- [ ] Журнал агента показывает прогоны + базовые метрики; rating 👍/👎 сохраняется  
+- [ ] Журнал ассистента показывает прогоны + базовые метрики; rating 👍/👎 сохраняется  
 - [ ] Без LLM-ключа: Gantt/Excel/undo работают; чат — контролируемая ошибка  
 - [ ] `apply_plan_patch` атомарный; инварианты описаны в README  
 - [ ] `make up` / `make seed` / `make test` работают; кнопка сброса демо-плана есть  
