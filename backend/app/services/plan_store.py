@@ -46,38 +46,76 @@ def plan_to_dict(db: Session, plan: Plan) -> dict[str, Any]:
 
 
 def push_snapshot(db: Session, plan: Plan, source: str) -> None:
+    """Save current plan for undo and clear redo (new edit branch)."""
+    _clear_stack(db, plan.id, kind="redo")
     payload = plan_to_dict(db, plan)
     db.add(
         PlanSnapshot(
             plan_id=plan.id,
             payload_json=json.dumps(payload, ensure_ascii=False),
             source=source,
+            kind="undo",
         )
     )
     db.flush()
     snaps = db.scalars(
         select(PlanSnapshot)
-        .where(PlanSnapshot.plan_id == plan.id)
+        .where(PlanSnapshot.plan_id == plan.id, PlanSnapshot.kind == "undo")
         .order_by(PlanSnapshot.id.desc())
     ).all()
     for old in snaps[10:]:
         db.delete(old)
 
 
+def _clear_stack(db: Session, plan_id: int, *, kind: str) -> None:
+    snaps = db.scalars(
+        select(PlanSnapshot).where(PlanSnapshot.plan_id == plan_id, PlanSnapshot.kind == kind)
+    ).all()
+    for s in snaps:
+        db.delete(s)
+    db.flush()
+
+
 def undo_count(db: Session, plan_id: int) -> int:
-    return len(db.scalars(select(PlanSnapshot.id).where(PlanSnapshot.plan_id == plan_id)).all())
+    return len(
+        db.scalars(
+            select(PlanSnapshot.id).where(
+                PlanSnapshot.plan_id == plan_id, PlanSnapshot.kind == "undo"
+            )
+        ).all()
+    )
+
+
+def redo_count(db: Session, plan_id: int) -> int:
+    return len(
+        db.scalars(
+            select(PlanSnapshot.id).where(
+                PlanSnapshot.plan_id == plan_id, PlanSnapshot.kind == "redo"
+            )
+        ).all()
+    )
+
+
+def _trim_stack(db: Session, plan_id: int, *, kind: str, limit: int = 10) -> None:
+    snaps = db.scalars(
+        select(PlanSnapshot)
+        .where(PlanSnapshot.plan_id == plan_id, PlanSnapshot.kind == kind)
+        .order_by(PlanSnapshot.id.desc())
+    ).all()
+    for old in snaps[limit:]:
+        db.delete(old)
 
 
 def restore_snapshot(db: Session, plan: Plan) -> bool:
+    """Undo: pop undo stack, push current to redo."""
     snap = db.scalars(
         select(PlanSnapshot)
-        .where(PlanSnapshot.plan_id == plan.id)
+        .where(PlanSnapshot.plan_id == plan.id, PlanSnapshot.kind == "undo")
         .order_by(PlanSnapshot.id.desc())
     ).first()
     if not snap:
         return False
 
-    # mark recent agent jobs as undone
     cutoff = datetime.utcnow() - timedelta(minutes=5)
     recent_jobs = db.scalars(
         select(AgentJob).where(
@@ -90,9 +128,47 @@ def restore_snapshot(db: Session, plan: Plan) -> bool:
     for job in recent_jobs:
         job.undone_within_5m = True
 
+    # current state → redo
+    current = plan_to_dict(db, plan)
+    db.add(
+        PlanSnapshot(
+            plan_id=plan.id,
+            payload_json=json.dumps(current, ensure_ascii=False),
+            source="undo",
+            kind="redo",
+        )
+    )
     payload = json.loads(snap.payload_json)
     db.delete(snap)
     db.flush()
+    _trim_stack(db, plan.id, kind="redo")
+    _replace_plan_content(db, plan, payload, changed_by="user")
+    return True
+
+
+def redo_snapshot(db: Session, plan: Plan) -> bool:
+    """Redo: pop redo stack, push current to undo."""
+    snap = db.scalars(
+        select(PlanSnapshot)
+        .where(PlanSnapshot.plan_id == plan.id, PlanSnapshot.kind == "redo")
+        .order_by(PlanSnapshot.id.desc())
+    ).first()
+    if not snap:
+        return False
+
+    current = plan_to_dict(db, plan)
+    db.add(
+        PlanSnapshot(
+            plan_id=plan.id,
+            payload_json=json.dumps(current, ensure_ascii=False),
+            source="redo",
+            kind="undo",
+        )
+    )
+    payload = json.loads(snap.payload_json)
+    db.delete(snap)
+    db.flush()
+    _trim_stack(db, plan.id, kind="undo")
     _replace_plan_content(db, plan, payload, changed_by="user")
     return True
 

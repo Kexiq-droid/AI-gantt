@@ -32,10 +32,10 @@ cd /var/CRM_test && . .venv/bin/activate && PYTHONPATH=/var/CRM_test make seed
 
 ## TLS / DNS
 
-Сейчас A-запись `bio.2alexs.ru` у Timeweb должна указывать на `186.246.30.20`.  
-Пока NXDOMAIN — используется self-signed в `/etc/letsencrypt/live/bio.2alexs.ru/`.
+A-запись `bio.2alexs.ru` → `186.246.30.20`.  
+Сертификат Let's Encrypt: `/etc/letsencrypt/live/bio.2alexs.ru/` (автопродление через certbot timer).
 
-После DNS:
+Перевыпуск при необходимости:
 
 ```bash
 certbot certonly --webroot -w /var/lib/letsencrypt -d bio.2alexs.ru \

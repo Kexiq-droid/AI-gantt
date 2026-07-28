@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.app.models import Dependency, Plan, Task
 from backend.app.schemas import DependencyOut, PlanOut, TaskOut
-from backend.app.services.plan_store import task_end, undo_count
+from backend.app.services.plan_store import task_end, undo_count, redo_count
 
 
 def serialize_plan(db: Session, plan: Plan) -> PlanOut:
@@ -58,6 +58,7 @@ def serialize_plan(db: Session, plan: Plan) -> PlanOut:
         tasks=task_outs,
         dependencies=dep_outs,
         undo_count=undo_count(db, plan.id),
+        redo_count=redo_count(db, plan.id),
     )
 
 

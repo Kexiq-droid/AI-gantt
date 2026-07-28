@@ -126,4 +126,6 @@ class PlanSnapshot(Base):
     plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id"), index=True)
     payload_json: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(16))
+    # undo = история назад; redo = стек «вперёд» после возврата
+    kind: Mapped[str] = mapped_column(String(8), default="undo", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

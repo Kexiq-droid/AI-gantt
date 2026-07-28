@@ -6,7 +6,7 @@ type Props = {
   plan: Plan
   highlightCodes: string[]
   onSelect: (task: Task) => void
-  onShiftTask: (taskId: number, newStart: string) => void
+  onShiftTasks: (taskIds: number[], days: number) => void
 }
 
 type Zoom = 'day' | 'week'
@@ -18,27 +18,34 @@ function parseDate(s: string) {
   return new Date(y, m - 1, d)
 }
 
-function fmt(d: Date) {
-  const yy = d.getFullYear()
-  const mm = String(d.getMonth() + 1).padStart(2, '0')
-  const dd = String(d.getDate()).padStart(2, '0')
-  return `${yy}-${mm}-${dd}`
-}
-
-function addDays(d: Date, n: number) {
-  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)
-}
-
 function daysBetween(a: Date, b: Date) {
   const a0 = new Date(a.getFullYear(), a.getMonth(), a.getDate())
   const b0 = new Date(b.getFullYear(), b.getMonth(), b.getDate())
   return Math.round((b0.getTime() - a0.getTime()) / 86400000)
 }
 
-export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Props) {
+function addDays(d: Date, n: number) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)
+}
+
+export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [zoom, setZoom] = useState<Zoom>('day')
-  const dragRef = useRef<{ id: number; startX: number; origStart: string } | null>(null)
+  const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const selectedRef = useRef<number[]>([])
+  selectedRef.current = selectedIds
+
+  const dragRef = useRef<{
+    anchorId: number
+    rootIds: number[]
+    visualIds: number[]
+    startX: number
+    moved: boolean
+    ctrlToggle: boolean
+  } | null>(null)
+
+  const rootRef = useRef<HTMLDivElement>(null)
+  const tasksById = useMemo(() => new Map(plan.tasks.map((t) => [t.id, t])), [plan.tasks])
 
   const childrenMap = useMemo(() => {
     const m = new Map<number | null, Task[]>()
@@ -76,7 +83,6 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
     return { min, max, total: Math.max(daysBetween(min, max), 14) }
   }, [plan])
 
-  // Day mode: weekday + dd
   const pxPerDay = zoom === 'day' ? 28 : 12
   const timelineWidth = range.total * pxPerDay
 
@@ -87,25 +93,81 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
 
   const hasChildren = (id: number) => (childrenMap.get(id) || []).length > 0
 
+  const subtreeIds = (rootId: number): number[] => {
+    const out = [rootId]
+    let i = 0
+    while (i < out.length) {
+      for (const c of childrenMap.get(out[i]) || []) out.push(c.id)
+      i += 1
+    }
+    return out
+  }
+
+  const dedupeRoots = (ids: number[]): number[] => {
+    const set = new Set(ids)
+    return ids.filter((id) => {
+      let p = tasksById.get(id)?.parent_id ?? null
+      while (p != null) {
+        if (set.has(p)) return false
+        p = tasksById.get(p)?.parent_id ?? null
+      }
+      return true
+    })
+  }
+
+  const visualIdsForRoots = (roots: number[]): number[] => {
+    const all = new Set<number>()
+    for (const r of roots) for (const id of subtreeIds(r)) all.add(id)
+    return [...all]
+  }
+
   useEffect(() => {
+    const DRAG_THRESHOLD_PX = 5
+    const setTranslate = (ids: number[], px: number) => {
+      for (const id of ids) {
+        const el = document.querySelector(`[data-bar-id="${id}"]`) as HTMLElement | null
+        if (el) el.style.translate = px ? `${px}px 0` : ''
+      }
+    }
     const onMove = (e: PointerEvent) => {
-      if (!dragRef.current) return
-      const deltaPx = e.clientX - dragRef.current.startX
+      const drag = dragRef.current
+      if (!drag || drag.ctrlToggle) return
+      const deltaPx = e.clientX - drag.startX
+      if (Math.abs(deltaPx) >= DRAG_THRESHOLD_PX) drag.moved = true
+      if (!drag.moved) return
       const deltaDays = Math.round(deltaPx / pxPerDay)
-      const el = document.querySelector(`[data-bar-id="${dragRef.current.id}"]`) as HTMLElement | null
-      if (el) el.style.translate = `${deltaDays * pxPerDay}px 0`
+      setTranslate(drag.visualIds, deltaDays * pxPerDay)
     }
     const onUp = (e: PointerEvent) => {
-      if (!dragRef.current) return
-      const deltaPx = e.clientX - dragRef.current.startX
-      const deltaDays = Math.round(deltaPx / pxPerDay)
-      const { id, origStart } = dragRef.current
+      const drag = dragRef.current
+      if (!drag) return
       dragRef.current = null
-      const el = document.querySelector(`[data-bar-id="${id}"]`) as HTMLElement | null
-      if (el) el.style.translate = ''
-      if (deltaDays !== 0) {
-        onShiftTask(id, fmt(addDays(parseDate(origStart), deltaDays)))
+
+      if (drag.ctrlToggle) {
+        // handled on pointerdown
+        return
       }
+
+      const deltaPx = e.clientX - drag.startX
+      const deltaDays = Math.round(deltaPx / pxPerDay)
+      setTranslate(drag.visualIds, 0)
+
+      if (drag.moved) {
+        if (deltaDays !== 0) onShiftTasks(drag.rootIds, deltaDays)
+        return
+      }
+
+      // plain click on a bar
+      const task = tasksById.get(drag.anchorId)
+      if (!task) return
+      const wasSelected = selectedRef.current.includes(drag.anchorId)
+      if (wasSelected && selectedRef.current.length === 1) {
+        onSelect(task)
+      } else if (!wasSelected) {
+        // selection already cleared on pointerdown; open card
+        onSelect(task)
+      }
+      // multi-select click without move: keep selection, no modal
     }
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
@@ -113,17 +175,47 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
     }
-  }, [onShiftTask, pxPerDay])
+  }, [onSelect, onShiftTasks, pxPerDay, tasksById])
+
+  // Click anywhere except selected bars → clear selection
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      if (e.button !== 0) return
+      const target = e.target as HTMLElement | null
+      const bar = target?.closest?.('[data-bar-id]') as HTMLElement | null
+      if (bar) {
+        const id = Number(bar.dataset.barId)
+        if (selectedRef.current.includes(id)) return
+        // unselected bar: selection cleared in bar handler
+        return
+      }
+      if (rootRef.current?.contains(target)) {
+        setSelectedIds([])
+      }
+    }
+    // capture so we clear even when other handlers stopPropagation
+    document.addEventListener('pointerdown', onDown, true)
+    return () => document.removeEventListener('pointerdown', onDown, true)
+  }, [])
 
   const nonWorkingBg = 'color-mix(in srgb, var(--danger) 14%, transparent)'
   const holidayBg = 'color-mix(in srgb, var(--danger) 22%, transparent)'
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow)]">
+    <div
+      ref={rootRef}
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow)]"
+    >
       <div className="flex items-center justify-between gap-3 border-b border-[var(--border)] px-4 py-3">
         <div>
           <div className="text-xs uppercase tracking-wide text-[var(--muted)]">План</div>
           <h2 className="text-lg leading-tight">{plan.title}</h2>
+          {selectedIds.length > 0 && (
+            <div className="mt-0.5 text-xs text-[var(--accent)]">
+              Выделено: {selectedIds.length} · Ctrl+клик — добавить/убрать
+            </div>
+          )}
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2 text-[11px] text-[var(--muted)]">
@@ -190,7 +282,6 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
           </div>
 
           <div className="relative" style={{ width: timelineWidth }}>
-            {/* Non-working day vertical bands behind bars */}
             <div
               className="pointer-events-none absolute left-0 z-0"
               style={{ top: HEADER_H, width: timelineWidth, height: flat.length * 40 }}
@@ -210,12 +301,10 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
               )}
             </div>
 
-            {/* 3-level header: year / month / weekday+dd-mm-yy */}
             <div
               className="sticky top-0 z-10 border-b border-[var(--border)] bg-[var(--surface)]"
               style={{ height: HEADER_H }}
             >
-              {/* Years */}
               <div className="relative h-[22px] border-b border-[var(--border)]">
                 {calendar.years.map((y) => (
                   <div
@@ -228,7 +317,6 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
                   </div>
                 ))}
               </div>
-              {/* Months */}
               <div className="relative h-[22px] border-b border-[var(--border)]">
                 {calendar.months.map((m) => (
                   <div
@@ -241,10 +329,8 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
                   </div>
                 ))}
               </div>
-              {/* Days: weekday + dd-mm-yy */}
               <div className="relative h-[28px]">
                 {calendar.days.map((day) => {
-                  // In week zoom show every 7th day label to avoid clutter
                   const showLabel = zoom === 'day' || day.offset % 7 === 0
                   return (
                     <div
@@ -311,6 +397,7 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
                 const width = Math.max(task.duration_days * pxPerDay, 8)
                 const isPhase = hasChildren(task.id)
                 const hl = highlightCodes.includes(task.code)
+                const isSelected = selectedSet.has(task.id)
                 return (
                   <div
                     key={task.id}
@@ -318,22 +405,55 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTask }: Prop
                   >
                     <div
                       data-bar-id={task.id}
-                      className={`absolute top-2 h-6 cursor-grab rounded-md ${hl ? 'bar-highlight' : ''}`}
+                      className={`absolute top-2 h-6 cursor-grab rounded-md active:cursor-grabbing ${hl ? 'bar-highlight' : ''}`}
                       style={{
                         left,
                         width,
                         background: isPhase ? 'var(--bar-phase)' : 'var(--bar)',
                         opacity: isPhase ? 0.85 : 1,
+                        outline: isSelected ? '2px dashed var(--accent)' : undefined,
+                        outlineOffset: isSelected ? 2 : undefined,
+                        zIndex: isSelected ? 2 : 1,
                       }}
-                      title={`${task.code}: ${task.start_date} → ${task.end_date}`}
-                      onClick={() => onSelect(task)}
+                      title={`${task.code}: ${task.start_date} → ${task.end_date}${isPhase ? ' (фаза: сдвиг с дочерними)' : ''}`}
                       onPointerDown={(e) => {
-                        if (isPhase) return
+                        if (e.button !== 0) return
                         e.preventDefault()
+                        e.stopPropagation()
+
+                        if (e.ctrlKey || e.metaKey) {
+                          setSelectedIds((prev) =>
+                            prev.includes(task.id)
+                              ? prev.filter((id) => id !== task.id)
+                              : [...prev, task.id],
+                          )
+                          dragRef.current = {
+                            anchorId: task.id,
+                            rootIds: [],
+                            visualIds: [],
+                            startX: e.clientX,
+                            moved: false,
+                            ctrlToggle: true,
+                          }
+                          return
+                        }
+
+                        const already = selectedRef.current.includes(task.id)
+                        let roots: number[]
+                        if (already) {
+                          roots = dedupeRoots(selectedRef.current)
+                        } else {
+                          setSelectedIds([])
+                          roots = [task.id]
+                        }
+                        const visual = visualIdsForRoots(roots)
                         dragRef.current = {
-                          id: task.id,
+                          anchorId: task.id,
+                          rootIds: roots,
+                          visualIds: visual,
                           startX: e.clientX,
-                          origStart: task.start_date,
+                          moved: false,
+                          ctrlToggle: false,
                         }
                       }}
                     />

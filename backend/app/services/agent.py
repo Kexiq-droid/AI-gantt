@@ -66,13 +66,19 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
   запроса из истории чата. Выполни его, не переспрашивай и не показывай меню возможностей.
 - После действия отвечай кратко: что сделал (1–3 предложения). Без лекций и без «чем могу помочь».
 - Не перечисляй каталог команд (shift/reassign/…) в ответ на рабочие запросы.
-- Undo («отмени») обрабатывается системой отдельно.
+- Возврат назад («отмени», «возврат», «назад») и вперёд («вперёд», «redo») обрабатываются системой отдельно.
 
 Интерпретации по умолчанию:
 - «Поменяй A и B местами» / «поменяй порядок A и B» → op swap (коды и названия НЕ менять;
   меняются sort_order и позиции на шкале времени у поддеревьев).
 - «Сдвинь доклинику / CMC / регуляторику на N дней» → shift с filter.phase_code.
-- «Назначь X на фазу Y» → reassign с filter.phase_code.
+- «Сдвинь задачу T2.1 на N дней» → shift с filter.code — СРАЗУ apply_plan_patch, без текста «выполняю».
+- «Назначь X на фазу Y» → reassign. Имена нормализуй («Иванов И.И.» / «Иванова» → «Иванов»).
+  НЕ выдумывай whitelist исполнителей и НЕ спрашивай подтверждение — сразу применяй.
+- «Поставь длительность P1 = 12» → update duration_days — сразу apply_plan_patch.
+
+КРИТИЧНО: никогда не пиши, что изменение сделано, если не вызвал apply_plan_patch.
+Если нужен mutating-запрос — сначала tool call, потом короткий отчёт по факту changes.
 
 Рабочие правила по плану:
 - Сначала при необходимости вызови get_plan_snapshot.
@@ -140,12 +146,228 @@ _SWAP_PATTERNS = [
     ),
 ]
 
+_SHIFT_TASK_RE = re.compile(
+    r"(?:сдвинь|сдвинуть|сдвиньте)\s+(?:задач[уие]\s+)?(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)"
+    r"\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
+    re.IGNORECASE,
+)
+
+# «T4.1 сдвинь на 7 дней» / «T4.1 CTD… сдвинь на 7»
+_SHIFT_CODE_FIRST_RE = re.compile(
+    r"(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)\b.{0,100}?"
+    r"(?:сдвинь|сдвинуть|сдвиньте)\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_SHIFT_PHASE_RE = re.compile(
+    r"(?:сдвинь|сдвинуть|сдвиньте)\s+(?:всю\s+)?(?P<body>.+?)\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
+    re.IGNORECASE,
+)
+
+# «верни задачу на 14 дней назад» / «сдвинь T4.1 на 14 дней назад»
+_SHIFT_BACK_RE = re.compile(
+    r"(?:верни|вернуть|верните|откатни|откати|сдвинь|сдвинуть|сдвиньте)\s+"
+    r"(?:задач[уие]\s+)?(?:(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)\s+)?"
+    r"на\s+(?P<days>\d+)\s*(?:дн\w*)?\s+назад",
+    re.IGNORECASE,
+)
+
+_DURATION_RE = re.compile(
+    r"(?:поставь|установи|сделай|измени)?\s*длительность\s+(?:задачи\s+|фазы\s+)?"
+    r"(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)\s*"
+    r"(?:равной|равна|=|на)?\s*(?P<days>\d+)\s*(?:дн\w*)?",
+    re.IGNORECASE,
+)
+
+_REASSIGN_RE = re.compile(
+    r"(?:назначь|назначить|переназначь|переназначить)\s+(?P<name>.+?)\s+на\s+"
+    r"(?:все\s+)?(?:задачи\s+)?(?:фазы\s+)?(?P<body>.+)$",
+    re.IGNORECASE,
+)
+
+_PHASE_ALIASES = (
+    ("доклин", "P2"),
+    ("cmc", "P3"),
+    ("производ", "P3"),
+    ("регулятор", "P4"),
+    ("аналитик", "P1"),
+    ("клиник", "P5"),
+)
+
 
 def _norm_code(code: str) -> str:
     c = code.strip().translate(str.maketrans({"р": "p", "Р": "P", "т": "t", "Т": "T"}))
     if c and c[0].isalpha():
         return c[0].upper() + c[1:]
     return c
+
+
+def _phase_from_text(body: str) -> str | None:
+    raw = (body or "").strip()
+    m = re.search(r"\(([A-Za-zА-Яа-я]\d+)\)", raw)
+    if m:
+        return _norm_code(m.group(1))
+    m = re.search(r"\b([PpРр]\d+)\b", raw)
+    if m:
+        return _norm_code(m.group(1))
+    low = raw.lower()
+    for needle, code in _PHASE_ALIASES:
+        if needle in low:
+            return code
+    return None
+
+
+def _normalize_assignee(name: str) -> str:
+    n = (name or "").strip().strip("\"'«»")
+    # «Иванов И.И.» / «Иванов И И» → «Иванов»
+    n = re.sub(r"\s+[A-Za-zА-Яа-я]\.?\s*[A-Za-zА-Яа-я]\.?\s*$", "", n).strip()
+    return n
+
+
+def _resolve_assignee(db: Session, plan: Plan, name: str) -> str:
+    n = _normalize_assignee(name)
+    snap = plan_to_dict(db, plan)
+    known = sorted({(t.get("assignee") or "").strip() for t in snap.get("tasks") or [] if t.get("assignee")})
+    if n in known:
+        return n
+    low = n.lower()
+    for a in known:
+        if a.lower() == low:
+            return a
+    # винительный: «Иванова» → «Иванов»
+    if n.endswith("а"):
+        cand = n[:-1]
+        for a in known:
+            if a == cand or a.lower() == cand.lower():
+                return a
+    # дательный ж.р.: «Орлову» → «Орлова»
+    if n.endswith(("у", "ю")):
+        cand = n[:-1] + "а"
+        for a in known:
+            if a == cand or a.lower() == cand.lower():
+                return a
+    for a in known:
+        if a.lower().startswith(low) or low.startswith(a.lower()):
+            return a
+    return n
+
+
+def _next_child_code(db: Session, plan: Plan, parent: str) -> str:
+    snap = plan_to_dict(db, plan)
+    tasks = snap.get("tasks") or []
+    existing = {t["code"] for t in tasks}
+    if parent.startswith("P") and parent[1:].isdigit():
+        phase_num = parent[1:]
+        nums: list[int] = []
+        for t in tasks:
+            if t.get("parent") != parent:
+                continue
+            m = re.match(rf"^T{re.escape(phase_num)}\.(\d+)$", t["code"])
+            if m:
+                nums.append(int(m.group(1)))
+        n = max(nums, default=0) + 1
+        while True:
+            code = f"T{phase_num}.{n}"
+            if code not in existing:
+                return code
+            n += 1
+    n = 1
+    while True:
+        code = f"{parent}-{n}"
+        if code not in existing:
+            return code
+        n += 1
+
+
+def _find_code_by_title_fragment(db: Session, plan: Plan, fragment: str) -> str | None:
+    frag = (fragment or "").strip().lower()
+    if len(frag) < 3:
+        return None
+    snap = plan_to_dict(db, plan)
+    for t in snap.get("tasks") or []:
+        title = (t.get("title") or "").lower()
+        if frag in title or title in frag:
+            return t["code"]
+    return None
+
+
+def _parse_create(db: Session, plan: Plan, text: str) -> dict[str, Any] | None:
+    raw = (text or "").strip()
+    if not re.search(r"(добав\w*|созда\w*|нужна\s+новая\s+задач)", raw, re.IGNORECASE):
+        return None
+
+    title_m = re.search(r"[«\"]([^»\"]+)[»\"]", raw)
+    title = title_m.group(1).strip() if title_m else None
+
+    # код новой задачи — не путать с «зависимость от T4.2»
+    work = re.sub(
+        r"(?:зависимост\w*\s+от|после)\s+[A-Za-zА-Яа-я]\d+(?:\.\d+)?",
+        " ",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    code_m = re.search(r"задач[уие]\s+([TtТт]\d+\.\d+)\b", work, re.IGNORECASE)
+    if not code_m:
+        code_m = re.search(r"\b([TtТт]\d+\.\d+)\b", work)
+    code = _norm_code(code_m.group(1)) if code_m else None
+
+    parent = _phase_from_text(raw)
+    if not parent and code and code.startswith("T") and "." in code:
+        parent = "P" + code[1:].split(".")[0]
+
+    if not parent:
+        return None
+
+    dur = 1
+    dur_m = re.search(r"длительность\s+(\d+)", raw, re.IGNORECASE)
+    if not dur_m:
+        dur_m = re.search(r"(?:на\s+|,\s*)(\d+)\s*(?:дн|день|дня|дней)", raw, re.IGNORECASE)
+    if dur_m:
+        dur = int(dur_m.group(1))
+
+    assignee = ""
+    ass_m = re.search(r"назначь\s+([А-ЯA-Z][а-яa-zА-ЯA-Z\-]+)", raw, re.IGNORECASE)
+    if ass_m:
+        assignee = _resolve_assignee(db, plan, ass_m.group(1))
+
+    predecessors: list[str] = []
+    dep_m = re.search(
+        r"(?:зависимост\w*\s+от|после)\s+([A-Za-zА-Яа-я]\d+(?:\.\d+)?)",
+        raw,
+        re.IGNORECASE,
+    )
+    if dep_m:
+        predecessors.append(_norm_code(dep_m.group(1)))
+    else:
+        after_m = re.search(
+            r"после\s+([A-Za-zА-Яа-я0-9][\w\s/.\-]{1,40}?)(?:\s*[—,\-]|\s+[«\"]|\s+на\s+|$)",
+            raw,
+            re.IGNORECASE,
+        )
+        if after_m:
+            frag = after_m.group(1).strip(" —,-")
+            found = _find_code_by_title_fragment(db, plan, frag)
+            if found:
+                predecessors.append(found)
+            elif re.match(r"^[A-Za-zА-Яа-я]\d+(?:\.\d+)?$", frag):
+                predecessors.append(_norm_code(frag))
+
+    if not title and not code:
+        return None
+    if not code:
+        code = _next_child_code(db, plan, parent)
+    if not title:
+        title = code
+
+    return {
+        "op": "create",
+        "code": code,
+        "parent": parent,
+        "title": title,
+        "duration_days": dur,
+        "assignee": assignee,
+        "predecessors": predecessors,
+    }
 
 
 def _parse_swap_codes(text: str) -> tuple[str, str] | None:
@@ -155,6 +377,84 @@ def _parse_swap_codes(text: str) -> tuple[str, str] | None:
         if m:
             return _norm_code(m.group("a")), _norm_code(m.group("b"))
     return None
+
+
+def _parse_shift(text: str, default_code: str | None = None) -> dict[str, Any] | None:
+    raw = (text or "").strip()
+    low = raw.lower()
+
+    m = _SHIFT_BACK_RE.search(raw)
+    if m:
+        code = _norm_code(m.group("code")) if m.group("code") else default_code
+        if code:
+            days = -abs(int(m.group("days")))
+            return {"filter": {"code": code}, "days": days}
+        return None
+
+    m = _SHIFT_TASK_RE.search(raw)
+    if m:
+        days = int(m.group("days"))
+        if "назад" in low:
+            days = -abs(days)
+        return {"filter": {"code": _norm_code(m.group("code"))}, "days": days}
+
+    m = _SHIFT_CODE_FIRST_RE.search(raw)
+    if m:
+        days = int(m.group("days"))
+        if "назад" in low:
+            days = -abs(days)
+        return {"filter": {"code": _norm_code(m.group("code"))}, "days": days}
+
+    m = _SHIFT_PHASE_RE.search(raw)
+    if not m:
+        return None
+    body = m.group("body").strip()
+    days = int(m.group("days"))
+    if "назад" in low:
+        days = -abs(days)
+    if re.fullmatch(r"(?:задач[уие]\s+)?[A-Za-zА-Яа-я]\d+(?:\.\d+)?", body, re.I):
+        return {
+            "filter": {
+                "code": _norm_code(re.sub(r"^задач[уие]\s+", "", body, flags=re.I))
+            },
+            "days": days,
+        }
+    phase = _phase_from_text(body)
+    if phase:
+        return {"filter": {"phase_code": phase}, "days": days}
+    # «сдвинь задачу на 7 дней» без кода — взять default_code
+    if default_code and re.search(r"задач", body, re.I):
+        return {"filter": {"code": default_code}, "days": days}
+    return None
+
+
+def _last_task_code_from_texts(texts: list[str]) -> str | None:
+    code_re = re.compile(r"\b([A-Za-zА-Яа-я]\d+(?:\.\d+)?)\b")
+    for text in reversed(texts):
+        found = code_re.findall(text or "")
+        for c in reversed(found):
+            nc = _norm_code(c)
+            if nc and nc[0].isalpha():
+                return nc
+    return None
+
+
+def _parse_duration(text: str) -> tuple[str, int] | None:
+    m = _DURATION_RE.search((text or "").strip())
+    if not m:
+        return None
+    return _norm_code(m.group("code")), int(m.group("days"))
+
+
+def _parse_reassign(text: str) -> tuple[str, str] | None:
+    m = _REASSIGN_RE.search((text or "").strip())
+    if not m:
+        return None
+    name = _normalize_assignee(m.group("name"))
+    phase = _phase_from_text(m.group("body"))
+    if not name or not phase:
+        return None
+    return name, phase
 
 
 def _is_confirm(text: str) -> bool:
@@ -221,22 +521,26 @@ def _finish_direct(
     db.commit()
 
 
-def _apply_swap_direct(
-    db: Session, job: AgentJob, plan: Plan, code_a: str, code_b: str
+def _apply_ops_direct(
+    db: Session,
+    job: AgentJob,
+    plan: Plan,
+    *,
+    operations: list[dict[str, Any]],
+    summary_ok: str,
+    model_name: str,
 ) -> bool:
-    """Apply swap without LLM. Returns True if handled."""
+    """Apply patch without LLM. Returns True if handled."""
     job.status = "running"
     job.provider = "rules"
-    job.model = "swap"
+    job.model = model_name
     db.commit()
     started = time.time()
-    result, changes = _run_tool(
-        db, plan, "apply_plan_patch", {"operations": [{"op": "swap", "codes": [code_a, code_b]}]}
-    )
+    result, changes = _run_tool(db, plan, "apply_plan_patch", {"operations": operations})
     tool_log = [
         {
             "name": "apply_plan_patch",
-            "args": {"operations": [{"op": "swap", "codes": [code_a, code_b]}]},
+            "args": {"operations": operations},
             "ok": bool(isinstance(result, dict) and result.get("ok")),
             "duration_ms": int((time.time() - started) * 1000),
             "result_preview": json.dumps(result, ensure_ascii=False)[:800],
@@ -248,7 +552,7 @@ def _apply_swap_direct(
             db,
             job,
             plan,
-            summary=f"Поменял местами {code_a} и {code_b}: порядок в списке и позиции на шкале времени.",
+            summary=summary_ok,
             changes=changes,
             ok=True,
             tool_log=tool_log,
@@ -259,13 +563,100 @@ def _apply_swap_direct(
         db,
         job,
         plan,
-        summary="; ".join(errs or ["Не удалось поменять местами"]),
+        summary="; ".join(errs or ["Не удалось применить изменение"]),
         changes=[],
         ok=False,
-        error="; ".join(errs or ["swap failed"]),
+        error="; ".join(errs or ["patch failed"]),
         tool_log=tool_log,
     )
     return True
+
+
+def _apply_swap_direct(
+    db: Session, job: AgentJob, plan: Plan, code_a: str, code_b: str
+) -> bool:
+    return _apply_ops_direct(
+        db,
+        job,
+        plan,
+        operations=[{"op": "swap", "codes": [code_a, code_b]}],
+        summary_ok=(
+            f"Поменял местами {code_a} и {code_b}: порядок в списке и позиции на шкале времени."
+        ),
+        model_name="swap",
+    )
+
+
+def _try_rule_mutations(
+    db: Session,
+    job: AgentJob,
+    plan: Plan,
+    raw_text: str,
+    *,
+    default_code: str | None = None,
+) -> bool:
+    """Handle common mutating phrases without LLM. True = handled."""
+    # create before duration: «… длительность 3 дня» иначе не перепутаем
+    create_op = _parse_create(db, plan, raw_text)
+    if create_op:
+        code = create_op["code"]
+        return _apply_ops_direct(
+            db,
+            job,
+            plan,
+            operations=[create_op],
+            summary_ok=(
+                f"Добавил задачу {code} «{create_op['title']}» "
+                f"в {create_op['parent']} ({create_op['duration_days']} дн.)."
+            ),
+            model_name="create",
+        )
+
+    shift = _parse_shift(raw_text, default_code=default_code)
+    if shift:
+        filt = shift["filter"]
+        days = shift["days"]
+        target = filt.get("code") or filt.get("phase_code")
+        direction = "назад" if days < 0 else "вперёд"
+        return _apply_ops_direct(
+            db,
+            job,
+            plan,
+            operations=[{"op": "shift", "filter": filt, "days": days}],
+            summary_ok=f"Сдвинул {target} на {abs(days)} дн. {direction}.",
+            model_name="shift",
+        )
+
+    dur = _parse_duration(raw_text)
+    if dur:
+        code, days = dur
+        return _apply_ops_direct(
+            db,
+            job,
+            plan,
+            operations=[{"op": "update", "code": code, "duration_days": days}],
+            summary_ok=f"Поставил длительность {code} = {days} дн.",
+            model_name="duration",
+        )
+
+    reassign = _parse_reassign(raw_text)
+    if reassign:
+        name, phase = reassign
+        name = _resolve_assignee(db, plan, name)
+        return _apply_ops_direct(
+            db,
+            job,
+            plan,
+            operations=[{"op": "reassign", "filter": {"phase_code": phase}, "assignee": name}],
+            summary_ok=f"Назначил «{name}» на все задачи фазы {phase}.",
+            model_name="reassign",
+        )
+
+    swap_codes = _parse_swap_codes(raw_text)
+    if swap_codes:
+        return _apply_swap_direct(db, job, plan, swap_codes[0], swap_codes[1])
+
+    return False
 
 
 def _client() -> tuple[OpenAI, str, str] | None:
@@ -370,8 +761,26 @@ def run_agent_job(db: Session, job_id: int) -> None:
     raw_text = (job.request_text or "").strip()
     text = raw_text.lower()
 
-    # rule-based undo
-    if text in {"отмени", "отмени последнее", "undo", "отменить"}:
+    # rule-based undo / redo
+    undo_cmds = {
+        "отмени",
+        "отмени последнее",
+        "отменить",
+        "undo",
+        "возврат",
+        "назад",
+        "верни назад",
+    }
+    redo_cmds = {
+        "вперёд",
+        "вперед",
+        "redo",
+        "верни вперёд",
+        "верни вперед",
+        "возврат вперёд",
+        "возврат вперед",
+    }
+    if text in undo_cmds:
         from backend.app.services.plan_store import restore_snapshot
 
         job.status = "running"
@@ -381,30 +790,51 @@ def run_agent_job(db: Session, job_id: int) -> None:
             db,
             job,
             plan,
-            summary="Последнее действие отменено." if ok else "Нечего отменять.",
+            summary="Вернул предыдущее состояние плана." if ok else "Нечего возвращать.",
             changes=[],
             ok=ok,
-            error=None if ok else "Стек undo пуст",
+            error=None if ok else "Стек возврата пуст",
         )
         return
 
-    # rule-based swap: «поменяй P3 и P4 местами»
-    swap_codes = _parse_swap_codes(raw_text)
-    if swap_codes:
-        _apply_swap_direct(db, job, plan, swap_codes[0], swap_codes[1])
+    if text in redo_cmds:
+        from backend.app.services.plan_store import redo_snapshot
+
+        job.status = "running"
+        db.commit()
+        ok = redo_snapshot(db, plan)
+        _finish_direct(
+            db,
+            job,
+            plan,
+            summary="Применил состояние вперёд." if ok else "Нечего применять вперёд.",
+            changes=[],
+            ok=ok,
+            error=None if ok else "Стек «вперёд» пуст",
+        )
         return
 
-    # short confirm after previous swap request in chat history
+    # rule-based mutations (LLM often narrates without tool calls)
+    hist_preview = _recent_chat_history(db, plan.id, job.id, limit=8)
+    default_code = _last_task_code_from_texts(
+        [raw_text] + [m["content"] for m in hist_preview]
+    )
+    looks_create = bool(
+        re.search(r"(добав|созда|нужна\s+новая\s+задач)", raw_text, re.IGNORECASE)
+    )
+    if _try_rule_mutations(db, job, plan, raw_text, default_code=default_code):
+        return
+
+    # short confirm → only the LAST non-confirm user request (not an old swap in history)
     if _is_confirm(raw_text):
-        hist = _recent_chat_history(db, plan.id, job.id, limit=16)
-        pending = None
-        for m in reversed(hist):
-            if m["role"] == "user":
-                pending = _parse_swap_codes(m["content"])
-                if pending:
-                    break
-        if pending:
-            _apply_swap_direct(db, job, plan, pending[0], pending[1])
+        last_user: str | None = None
+        for m in reversed(hist_preview):
+            if m["role"] == "user" and not _is_confirm(m["content"]):
+                last_user = m["content"]
+                break
+        if last_user and _try_rule_mutations(
+            db, job, plan, last_user, default_code=default_code
+        ):
             return
 
     client_info = _client()

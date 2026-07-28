@@ -36,9 +36,29 @@ def get_db() -> Generator[Session, None, None]:
 
 def init_db() -> None:
     from backend.app import models  # noqa: F401
+    from sqlalchemy import inspect, text
 
     Path = __import__("pathlib").Path
     if settings.database_url.startswith("sqlite:///"):
         path = settings.database_url.replace("sqlite:///", "", 1)
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
+
+    # lightweight migrate: plan_snapshots.kind
+    try:
+        insp = inspect(engine)
+        if "plan_snapshots" in insp.get_table_names():
+            cols = {c["name"] for c in insp.get_columns("plan_snapshots")}
+            if "kind" not in cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE plan_snapshots ADD COLUMN kind VARCHAR(8) "
+                            "DEFAULT 'undo'"
+                        )
+                    )
+                    conn.execute(
+                        text("UPDATE plan_snapshots SET kind = 'undo' WHERE kind IS NULL")
+                    )
+    except Exception:
+        pass

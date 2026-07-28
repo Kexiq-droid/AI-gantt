@@ -36,7 +36,7 @@ export function AgentJournal({ open, onClose }: Props) {
             <div>Прогонов: {stats.total}</div>
             <div>Success: {(stats.success_rate * 100).toFixed(0)}%</div>
             <div>Validate fail: {(stats.validate_fail_rate * 100).toFixed(0)}%</div>
-            <div>Undo&lt;5м: {(stats.undo_after_agent_rate * 100).toFixed(0)}%</div>
+            <div>Возврат&lt;5м: {(stats.undo_after_agent_rate * 100).toFixed(0)}%</div>
             <div>👍 {stats.ratings_up}</div>
             <div>👎 {stats.ratings_down}</div>
             <div className="col-span-2 text-[var(--muted)]">

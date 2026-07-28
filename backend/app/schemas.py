@@ -51,6 +51,7 @@ class PlanOut(BaseModel):
     tasks: list[TaskOut]
     dependencies: list[DependencyOut]
     undo_count: int = 0
+    redo_count: int = 0
 
 
 class TaskUpdate(BaseModel):
@@ -59,6 +60,11 @@ class TaskUpdate(BaseModel):
     assignee: str | None = None
     duration_days: int | None = None
     start_date: date | None = None
+
+
+class TasksShiftRequest(BaseModel):
+    task_ids: list[int] = Field(default_factory=list)
+    days: int
 
 
 class ChatRequest(BaseModel):

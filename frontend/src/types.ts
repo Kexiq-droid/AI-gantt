@@ -27,6 +27,7 @@ export type Plan = {
     successor_code: string
   }[]
   undo_count: number
+  redo_count: number
 }
 
 export type User = { id: number; login: string }

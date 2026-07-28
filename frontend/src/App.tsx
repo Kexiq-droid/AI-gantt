@@ -49,6 +49,7 @@ export default function App() {
   const [toast, setToast] = useState('')
   const [theme, setTheme] = useState<'light' | 'dark'>(getTheme)
   const [journalOpen, setJournalOpen] = useState(false)
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false)
   const [error, setError] = useState('')
   const [chatOpen, setChatOpen] = useState(loadChatOpen)
   const [chatWidth, setChatWidth] = useState(loadChatWidth)
@@ -183,6 +184,8 @@ export default function App() {
   if (!user) {
     return (
       <LoginPage
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
         onLogin={async () => {
           const u = await api.me()
           setUser(u)
@@ -212,13 +215,28 @@ export default function App() {
             onClick={async () => {
               try {
                 setPlan(await api.undo())
-                setToast('Отменено')
+                setToast('Возврат')
               } catch (e) {
                 setError(e instanceof Error ? e.message : 'Ошибка')
               }
             }}
           >
-            Undo ({plan?.undo_count ?? 0})
+            ← Возврат ({plan?.undo_count ?? 0})
+          </button>
+          <button
+            type="button"
+            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+            disabled={!plan || (plan.redo_count ?? 0) < 1}
+            onClick={async () => {
+              try {
+                setPlan(await api.redo())
+                setToast('Вперёд')
+              } catch (e) {
+                setError(e instanceof Error ? e.message : 'Ошибка')
+              }
+            }}
+          >
+            Вперёд → ({plan?.redo_count ?? 0})
           </button>
           <button
             type="button"
@@ -248,11 +266,11 @@ export default function App() {
             type="button"
             className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
             onClick={async () => {
-              const blob = await api.exportExcel()
+              const { blob, filename } = await api.exportExcel()
               const url = URL.createObjectURL(blob)
               const a = document.createElement('a')
               a.href = url
-              a.download = 'bioplan.xlsx'
+              a.download = filename
               a.click()
               URL.revokeObjectURL(url)
             }}
@@ -262,13 +280,7 @@ export default function App() {
           <button
             type="button"
             className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
-            onClick={async () => {
-              if (!confirm('Восстановить демо-план? Текущие изменения будут сброшены.')) return
-              setPlan(await api.resetSeed())
-              setMessages([])
-              setToast('Демо-план восстановлен')
-              await refresh()
-            }}
+            onClick={() => setResetConfirmOpen(true)}
           >
             Сброс демо
           </button>
@@ -318,8 +330,9 @@ export default function App() {
               plan={plan}
               highlightCodes={highlight}
               onSelect={setSelected}
-              onShiftTask={async (taskId, newStart) => {
-                setPlan(await api.updateTask(taskId, { start_date: newStart }))
+              onShiftTasks={async (taskIds, days) => {
+                if (!days || taskIds.length === 0) return
+                setPlan(await api.shiftTasks(taskIds, days))
               }}
             />
           ) : (
@@ -400,6 +413,54 @@ export default function App() {
         />
       )}
       <AgentJournal open={journalOpen} onClose={() => setJournalOpen(false)} />
+
+      {resetConfirmOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+          onClick={() => setResetConfirmOpen(false)}
+        >
+          <div
+            className="w-full max-w-md rounded-xl border border-[var(--border)] bg-[var(--surface)] p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="reset-demo-title"
+          >
+            <h2 id="reset-demo-title" className="text-lg font-medium">
+              Восстановить демо-план?
+            </h2>
+            <p className="mt-2 text-sm text-[var(--muted)]">
+              Текущие изменения будут сброшены. Чат и журнал агента тоже очистятся.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+                onClick={() => setResetConfirmOpen(false)}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white"
+                onClick={async () => {
+                  setResetConfirmOpen(false)
+                  try {
+                    setPlan(await api.resetSeed())
+                    setMessages([])
+                    setToast('Демо-план восстановлен')
+                    await refresh()
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : 'Ошибка сброса')
+                  }
+                }}
+              >
+                Сбросить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

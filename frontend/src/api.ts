@@ -38,13 +38,33 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+  shiftTasks: (taskIds: number[], days: number) =>
+    request<import('./types').Plan>('/api/plans/tasks/shift', {
+      method: 'POST',
+      body: JSON.stringify({ task_ids: taskIds, days }),
+    }),
   undo: () => request<import('./types').Plan>('/api/plans/current/undo', { method: 'POST' }),
+  redo: () => request<import('./types').Plan>('/api/plans/current/redo', { method: 'POST' }),
   resetSeed: () =>
     request<import('./types').Plan>('/api/plans/current/reset-seed', { method: 'POST' }),
   exportExcel: async () => {
     const res = await fetch('/api/plans/current/export', { credentials: 'include' })
     if (!res.ok) throw new Error('Не удалось экспортировать')
-    return res.blob()
+    const blob = await res.blob()
+    const cd = res.headers.get('Content-Disposition') || ''
+    const utf = /filename\*=UTF-8''([^;]+)/i.exec(cd)
+    const plain = /filename="?([^";]+)"?/i.exec(cd)
+    let filename = 'BioPlan.xlsx'
+    if (utf?.[1]) {
+      try {
+        filename = decodeURIComponent(utf[1])
+      } catch {
+        filename = utf[1]
+      }
+    } else if (plain?.[1]) {
+      filename = plain[1]
+    }
+    return { blob, filename }
   },
   importExcel: async (file: File) => {
     const fd = new FormData()
