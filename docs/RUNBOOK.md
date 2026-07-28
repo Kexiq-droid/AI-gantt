@@ -1,0 +1,53 @@
+# Runbook — BioPlan
+
+## Сервисы
+
+| Что | Как |
+|-----|-----|
+| API | `systemctl status bioplan-api` |
+| Рестарт API | `systemctl restart bioplan-api` |
+| Логи | `journalctl -u bioplan-api -f` |
+| nginx | `nginx -t && systemctl reload nginx` |
+| Health | `curl -s http://127.0.0.1:8100/api/health` |
+
+## Каталоги
+
+- Код: `/var/CRM_test`
+- БД: путь из `DATABASE_URL` (по умолчанию `/var/CRM_test/data/bioplan.db`)
+- Статика: `/var/CRM_test/frontend/dist` (отдаёт FastAPI)
+- env: `/var/CRM_test/.env`
+
+## Смена LLM
+
+1. Править `.env`: `LLM_PROVIDER`, ключи, модель.
+2. `systemctl restart bioplan-api`
+3. Проверить `"llm":"ok"` в `/api/health`.
+
+## Сброс демо
+
+```bash
+cd /var/CRM_test && . .venv/bin/activate && PYTHONPATH=/var/CRM_test make seed
+# или кнопка «Сброс демо» в UI
+```
+
+## TLS / DNS
+
+Сейчас A-запись `bio.2alexs.ru` у Timeweb должна указывать на `186.246.30.20`.  
+Пока NXDOMAIN — используется self-signed в `/etc/letsencrypt/live/bio.2alexs.ru/`.
+
+После DNS:
+
+```bash
+certbot certonly --webroot -w /var/lib/letsencrypt -d bio.2alexs.ru \
+  --account b9b7f688b6a806a1941007d73c6e4784
+systemctl reload nginx
+```
+
+## Типичные сбои
+
+| Симптом | Действие |
+|---------|----------|
+| Чат: ассистент недоступен | Нет ключа / `llm: degraded` — добавить ключ |
+| 401 после логина | `COOKIE_SECURE=true` требует HTTPS |
+| Пустой план | `make seed` или reset-seed |
+| nginx 404 на HTTPS без SNI | Открывать по имени `https://bio.2alexs.ru` |

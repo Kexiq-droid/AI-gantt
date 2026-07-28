@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="light"] {
+  --bg: #f6f3ee;
+  --surface: #fffcf8;
+  --surface-2: #efeae2;
+  --text: #1c2422;
+  --muted: #5c6b66;
+  --accent: #0f766e;
+  --accent-soft: #ccfbf1;
+  --border: #ddd4c8;
+  --danger: #b42318;
+  --bar: #0f766e;
+  --bar-phase: #134e4a;
+  --highlight: #f59e0b;
+  --shadow: 0 1px 2px rgb(28 36 34 / 6%);
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #12181a;
+  --surface: #1a2226;
+  --surface-2: #243036;
+  --text: #e8eee9;
+  --muted: #9aaba4;
+  --accent: #2dd4bf;
+  --accent-soft: #134e4a;
+  --border: #2f3c42;
+  --danger: #f97066;
+  --bar: #14b8a6;
+  --bar-phase: #5eead4;
+  --highlight: #fbbf24;
+  --shadow: 0 1px 2px rgb(0 0 0 / 35%);
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: Manrope, system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+h1,
+h2,
+.brand {
+  font-family: "Source Serif 4", Georgia, serif;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+@keyframes pulse-bar {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--highlight) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--highlight) 35%, transparent);
+  }
+}
+
+.bar-highlight {
+  animation: pulse-bar 1s ease-in-out 3;
+  outline: 2px solid var(--highlight);
+}

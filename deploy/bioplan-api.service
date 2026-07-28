@@ -1,0 +1,16 @@
+[Unit]
+Description=BioPlan API
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/var/CRM_test
+Environment=PYTHONPATH=/var/CRM_test
+EnvironmentFile=/var/CRM_test/.env
+ExecStart=/var/CRM_test/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8100
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
