@@ -35,6 +35,7 @@ def plan_to_dict(db: Session, plan: Plan) -> dict[str, Any]:
                 "description": t.description or "",
                 "assignee": t.assignee or "",
                 "duration_days": t.duration_days,
+                "progress_pct": int(getattr(t, "progress_pct", 0) or 0),
                 "start_date": t.start_date.isoformat(),
                 "sort_order": t.sort_order,
                 "last_changed_by": t.last_changed_by,
@@ -195,6 +196,7 @@ def _replace_plan_content(
             description=t.get("description") or "",
             assignee=t.get("assignee") or "",
             duration_days=int(t.get("duration_days") or 1),
+            progress_pct=max(0, min(100, int(t.get("progress_pct") or 0))),
             start_date=date.fromisoformat(t["start_date"])
             if t.get("start_date")
             else plan.start_date,
@@ -259,3 +261,30 @@ def ensure_user_plan(db: Session, user_id: int) -> Plan:
     db.flush()
     load_seed_into_plan(db, plan)
     return plan
+
+
+def apply_imported_xlsx(
+    db: Session,
+    plan: Plan,
+    content: bytes,
+    *,
+    source: str = "excel",
+    changed_by: str = "user",
+) -> tuple[bool, list[str], list[str], str]:
+    """Import .xlsx bytes into plan. Returns (ok, errors, task_codes, title)."""
+    from backend.app.services.excel_io import import_plan_xlsx
+    from backend.app.services.validate import validate_plan_dict
+
+    try:
+        payload = import_plan_xlsx(content, plan_start=plan.start_date)
+    except Exception as exc:  # noqa: BLE001
+        return False, [f"Ошибка импорта: {exc}"], [], ""
+    errors = validate_plan_dict(payload)
+    if errors:
+        return False, errors, [], ""
+    push_snapshot(db, plan, source=source)
+    _replace_plan_content(db, plan, payload, changed_by=changed_by)
+    db.flush()
+    codes = [str(t.get("code")) for t in (payload.get("tasks") or []) if t.get("code")]
+    title = str(payload.get("title") or plan.title or "")
+    return True, [], codes, title

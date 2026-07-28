@@ -43,7 +43,7 @@ export function LoginPage({ onLogin, theme, onToggleTheme }: Props) {
         title={dark ? 'Светлая тема' : 'Тёмная тема'}
         aria-label={dark ? 'Включить светлую тему' : 'Включить тёмную тему'}
       >
-        {dark ? 'Светлая' : 'Тёмная'}
+        {dark ? 'Светлая тема' : 'Тёмная тема'}
       </button>
 
       <WavyBackground
@@ -68,7 +68,7 @@ export function LoginPage({ onLogin, theme, onToggleTheme }: Props) {
           <div className="mb-6">
             <div className="brand text-4xl text-[var(--accent)]">BioPlan</div>
             <p className="mt-2 text-sm text-[var(--muted)]">
-              AI-планировщик R&D: Gantt, Excel и правки на естественном языке
+              План R&D на естественном языке
             </p>
           </div>
           <form className="space-y-4" onSubmit={submit}>

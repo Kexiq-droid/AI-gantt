@@ -18,6 +18,25 @@ def serialize_plan(db: Session, plan: Plan) -> PlanOut:
     for d in deps:
         preds.setdefault(d.successor_task_id, []).append(id_to_code.get(d.predecessor_task_id, "?"))
 
+    children: dict[int, list[Task]] = {}
+    for t in tasks:
+        if t.parent_id:
+            children.setdefault(t.parent_id, []).append(t)
+
+    progress_cache: dict[int, int] = {}
+
+    def effective_progress(task: Task) -> int:
+        if task.id in progress_cache:
+            return progress_cache[task.id]
+        kids = children.get(task.id) or []
+        if not kids:
+            val = max(0, min(100, int(getattr(task, "progress_pct", 0) or 0)))
+        else:
+            vals = [effective_progress(c) for c in kids]
+            val = int(round(sum(vals) / len(vals))) if vals else 0
+        progress_cache[task.id] = val
+        return val
+
     task_outs = []
     for t in tasks:
         task_outs.append(
@@ -30,12 +49,14 @@ def serialize_plan(db: Session, plan: Plan) -> PlanOut:
                 description=t.description or "",
                 assignee=t.assignee or "",
                 duration_days=t.duration_days,
+                progress_pct=effective_progress(t),
                 start_date=t.start_date,
                 end_date=task_end(t.start_date, t.duration_days),
                 sort_order=t.sort_order,
                 last_changed_by=t.last_changed_by,
                 updated_at=t.updated_at,
                 predecessor_codes=preds.get(t.id, []),
+                has_children=bool(children.get(t.id)),
             )
         )
 

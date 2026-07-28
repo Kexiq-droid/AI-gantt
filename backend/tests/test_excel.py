@@ -1,7 +1,7 @@
 from datetime import date
 from io import BytesIO
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from backend.app.services.excel_io import (
     export_filename,
@@ -67,10 +67,81 @@ def test_excel_roundtrip():
     p1 = next(t for t in imported["tasks"] if t["code"] == "P1")
     assert p1["title"] == "Фаза"
     assert p1["parent"] is None
+    assert p1["start_date"] == "2026-03-02"
+    assert t12["start_date"] == "2026-03-05"
+
+
+def test_export_includes_start_end_columns():
+    raw = export_plan_xlsx(_sample_plan())
+    wb = load_workbook(BytesIO(raw), data_only=True)
+    ws = wb.active
+    headers = [str(c.value or "").strip().lower() for c in next(ws.iter_rows(min_row=5, max_row=5))]
+    assert "дата начала" in headers
+    assert "дата конца" in headers
+    # T1.1: start 02.03.2026, duration 3 → end 05.03.2026
+    i_start = headers.index("дата начала")
+    i_end = headers.index("дата конца")
+    row = [c.value for c in next(ws.iter_rows(min_row=7, max_row=7))]  # T1.1
+    start_v = row[i_start].date() if hasattr(row[i_start], "date") else row[i_start]
+    end_v = row[i_end].date() if hasattr(row[i_end], "date") else row[i_end]
+    assert start_v == date(2026, 3, 2)
+    assert end_v == date(2026, 3, 5)
+
+
+def test_import_uses_explicit_dates():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "код",
+            "задача",
+            "описание",
+            "исполнитель",
+            "длительность",
+            "дата начала",
+            "дата конца",
+            "предшественники",
+            "родитель",
+        ]
+    )
+    ws.append(["P1", "Фаза", "", "", 10, date(2026, 4, 1), date(2026, 4, 11), "", ""])
+    ws.append(["T1.1", "Задача", "", "Иванов", 4, date(2026, 4, 3), date(2026, 4, 7), "", "P1"])
+    buf = BytesIO()
+    wb.save(buf)
+    imported = import_plan_xlsx(buf.getvalue(), plan_start=date(2026, 1, 1))
+    assert imported["start_date"] == "2026-04-01"
+    t11 = next(t for t in imported["tasks"] if t["code"] == "T1.1")
+    assert t11["start_date"] == "2026-04-03"
+    assert t11["duration_days"] == 4
+
+
+def test_import_derives_duration_from_dates():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "код",
+            "задача",
+            "описание",
+            "исполнитель",
+            "длительность",
+            "дата начала",
+            "дата конца",
+            "предшественники",
+            "родитель",
+        ]
+    )
+    ws.append(["T1", "Alone", "", "", "", "2026-05-10", "2026-05-15", "", ""])
+    buf = BytesIO()
+    wb.save(buf)
+    imported = import_plan_xlsx(buf.getvalue())
+    t = imported["tasks"][0]
+    assert t["start_date"] == "2026-05-10"
+    assert t["duration_days"] == 5
 
 
 def test_excel_legacy_plain_header_still_imports():
-    """Old draft exports (header on row 1) must keep working."""
+    """Old draft exports (header on row 1, no date cols) must keep working."""
     wb = Workbook()
     ws = wb.active
     ws.append(["код", "задача", "описание", "исполнитель", "длительность", "предшественники", "родитель"])
@@ -80,6 +151,7 @@ def test_excel_legacy_plain_header_still_imports():
     wb.save(buf)
     imported = import_plan_xlsx(buf.getvalue(), plan_start=date(2026, 3, 2))
     assert {t["code"] for t in imported["tasks"]} == {"P1", "T1.1"}
+    assert imported["tasks"][0]["start_date"] == "2026-03-02"
 
 
 def test_export_filename_sanitizes():

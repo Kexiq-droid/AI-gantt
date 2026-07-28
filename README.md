@@ -4,7 +4,7 @@ AI-native Gantt для R&D-планирования (тестовое задан
 
 **EN:** BioPlan is an interactive hierarchical Gantt with seeded pharma R&D data, Excel import/export, and a chat agent that edits the plan via MCP-compatible tools. Deploy target: `https://bio.2alexs.ru`.
 
-Демо-ролик (черновик-раскадровка): [docs/demo.gif](docs/demo.gif) — замените на запись реального UI по [docs/DEMO.md](docs/DEMO.md).
+Демо основного сценария: [docs/demo.gif](docs/demo.gif) (логин → сид-Gantt → Excel ↑ → правка через чат → возврат → Excel ↓). Чеклист и пересъёмка: [docs/DEMO.md](docs/DEMO.md).
 
 ## Быстрый старт
 
@@ -29,10 +29,11 @@ make up                # или: systemctl start bioplan-api
 
 1. Открыть приложение → войти как `pm` → виден сид-Gantt BIO-X.
 2. Загрузить `examples/plan_biokad_demo.xlsx`.
-3. В чат: `Сдвинь всю доклинику на 10 дней и назначь Иванова на все задачи фазы CMC`.
-4. Summary + подсветка баров.
-5. Undo.
-6. Excel ↓.
+3. В чат: прикрепить Excel (📎) и написать `импортируй` — или загрузить через `Excel ↑`.
+4. В чат: `Сдвинь всю доклинику на 10 дней и назначь Иванова на все задачи фазы CMC`.
+5. Summary + подсветка баров.
+6. Undo.
+7. Excel ↓.
 
 ## Архитектура
 

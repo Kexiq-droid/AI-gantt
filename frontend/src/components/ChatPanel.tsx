@@ -6,7 +6,7 @@ import { MarkdownMessage } from './MarkdownMessage'
 type Props = {
   messages: ChatMessage[]
   busy: boolean
-  onSend: (text: string) => Promise<void>
+  onSend: (text: string, file?: File | null) => Promise<void>
   onRated: (jobId: number, rating: 'up' | 'down') => void
   onCollapse: () => void
 }
@@ -51,9 +51,11 @@ function formatDayLabel(iso: string) {
 
 export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props) {
   const [text, setText] = useState('')
+  const [file, setFile] = useState<File | null>(null)
   const [ratings, setRatings] = useState<Record<number, 'up' | 'down'>>({})
   const [pending, setPending] = useState<number | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -91,6 +93,17 @@ export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props
     }
   }
 
+  async function submit() {
+    if (busy) return
+    const msg = text.trim()
+    if (!msg && !file) return
+    const attached = file
+    setText('')
+    setFile(null)
+    if (fileRef.current) fileRef.current.value = ''
+    await onSend(msg || (attached ? `Импортируй план из файла «${attached.name}»` : ''), attached)
+  }
+
   let lastDay = ''
 
   return (
@@ -114,7 +127,8 @@ export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props
       <div className="min-h-0 flex-1 space-y-3 overflow-auto px-4 py-3">
         {messages.length === 0 && (
           <p className="text-sm text-[var(--muted)]">
-            Например: «Сдвинь всю доклинику на 10 дней и назначь Иванова на все задачи фазы CMC»
+            Например: «Сдвинь всю доклинику на 10 дней…» или прикрепите Excel и напишите
+            «импортируй».
           </p>
         )}
         {messages.map((m) => {
@@ -140,6 +154,16 @@ export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props
                   isUser ? 'ml-auto bg-[var(--accent)] text-white' : 'bg-[var(--surface-2)]'
                 }`}
               >
+                {m.meta?.attachment_name && (
+                  <div
+                    className={`mb-1.5 inline-flex max-w-full items-center gap-1.5 rounded-lg px-2 py-1 text-xs ${
+                      isUser ? 'bg-white/15' : 'bg-[var(--bg)]'
+                    }`}
+                  >
+                    <span aria-hidden>📎</span>
+                    <span className="truncate">{m.meta.attachment_name}</span>
+                  </div>
+                )}
                 {m.role === 'assistant' ? (
                   <MarkdownMessage content={m.content} />
                 ) : (
@@ -205,7 +229,7 @@ export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props
         })}
         {busy && (
           <div className="rounded-xl bg-[var(--surface-2)] px-3 py-2 text-sm text-[var(--muted)]">
-            Агент думает…
+            Ассистент думает…
           </div>
         )}
         <div ref={bottomRef} />
@@ -215,32 +239,68 @@ export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props
         className="border-t border-[var(--border)] p-3"
         onSubmit={async (e) => {
           e.preventDefault()
-          if (!text.trim() || busy) return
-          const msg = text
-          setText('')
-          await onSend(msg)
+          await submit()
         }}
       >
+        {file && (
+          <div className="mb-2 flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--bg)] px-2 py-1.5 text-xs">
+            <span aria-hidden>📎</span>
+            <span className="min-w-0 flex-1 truncate">{file.name}</span>
+            <button
+              type="button"
+              className="text-[var(--muted)] hover:text-[var(--danger)]"
+              aria-label="Убрать файл"
+              onClick={() => {
+                setFile(null)
+                if (fileRef.current) fileRef.current.value = ''
+              }}
+            >
+              ✕
+            </button>
+          </div>
+        )}
         <textarea
           className="mb-2 w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm"
           rows={3}
-          placeholder="Сообщение на естественном языке…"
+          placeholder="Напишите, что изменить в плане…"
           value={text}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
               e.preventDefault()
-              e.currentTarget.form?.requestSubmit()
+              void submit()
             }
           }}
         />
-        <button
-          type="submit"
-          disabled={busy || !text.trim()}
-          className="w-full rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
-        >
-          Отправить
-        </button>
+        <div className="flex gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            className="hidden"
+            onChange={(e) => {
+              const f = e.target.files?.[0] || null
+              setFile(f)
+            }}
+          />
+          <button
+            type="button"
+            title="Прикрепить Excel"
+            aria-label="Прикрепить Excel"
+            disabled={busy}
+            className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2 text-sm disabled:opacity-50"
+            onClick={() => fileRef.current?.click()}
+          >
+            📎
+          </button>
+          <button
+            type="submit"
+            disabled={busy || (!text.trim() && !file)}
+            className="flex-1 rounded-lg bg-[var(--accent)] px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            Отправить
+          </button>
+        </div>
       </form>
     </div>
   )

@@ -89,6 +89,7 @@ def apply_plan_patch_dict(
                     or working.get("start_date")
                     or date.today().isoformat(),
                     "sort_order": int(op.get("sort_order") or (max((t["sort_order"] for t in tasks), default=0) + 1)),
+                    "progress_pct": max(0, min(100, int(op.get("progress_pct") or 0))),
                     "last_changed_by": changed_by,
                     "predecessors": list(op.get("predecessors") or []),
                 }
@@ -110,6 +111,7 @@ def apply_plan_patch_dict(
                     "start_date",
                     "parent",
                     "sort_order",
+                    "progress_pct",
                 ):
                     if key in op and key not in fields:
                         fields[key] = op[key]
@@ -127,11 +129,18 @@ def apply_plan_patch_dict(
                     "start_date",
                     "parent",
                     "sort_order",
+                    "progress_pct",
                 ):
                     if key in fields:
                         val = fields[key]
-                        if key in ("duration_days", "sort_order"):
+                        if key in ("duration_days", "sort_order", "progress_pct"):
                             val = int(val)
+                        if key == "progress_pct":
+                            val = max(0, min(100, val))
+                            if any(x.get("parent") == code for x in tasks):
+                                raise ValueError(
+                                    f"Прогресс фазы {code} считается автоматически по дочерним"
+                                )
                         if t.get(key) != val:
                             changed_any = True
                         t[key] = val

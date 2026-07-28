@@ -122,8 +122,8 @@ export default function App() {
               knownJobs.current.add(job.id)
               setToast(
                 job.status === 'done'
-                  ? `Агент завершил задачу #${job.id}`
-                  : `Агент завершился с ошибкой #${job.id}`,
+                  ? `Ассистент завершил задачу #${job.id}`
+                  : `Ассистент завершился с ошибкой #${job.id}`,
               )
               await refresh()
               if (job.changes?.length) {
@@ -164,7 +164,7 @@ export default function App() {
             window.setTimeout(() => setHighlight([]), 4500)
           }
           if (job.status === 'failed') {
-            setToast(job.error || 'Ошибка агента')
+            setToast(job.error || 'Ошибка ассистента')
           }
           return
         }
@@ -203,47 +203,53 @@ export default function App() {
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <button
             type="button"
-            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+            className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
             onClick={() => setTheme((t) => (t === 'light' ? 'dark' : 'light'))}
           >
-            {theme === 'light' ? 'Тёмная' : 'Светлая'}
+            {theme === 'light' ? 'Тёмная тема' : 'Светлая тема'}
           </button>
           <button
             type="button"
-            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
-            disabled={!plan || plan.undo_count < 1}
+            className={`header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm ${
+              !plan || plan.undo_count < 1 ? 'is-disabled' : ''
+            }`}
+            aria-disabled={!plan || plan.undo_count < 1}
             onClick={async () => {
+              if (!plan || plan.undo_count < 1) return
               try {
                 setPlan(await api.undo())
-                setToast('Возврат')
+                setToast('Изменение отменено')
               } catch (e) {
                 setError(e instanceof Error ? e.message : 'Ошибка')
               }
             }}
           >
-            ← Возврат ({plan?.undo_count ?? 0})
+            ← Отменить ({plan?.undo_count ?? 0})
           </button>
           <button
             type="button"
-            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
-            disabled={!plan || (plan.redo_count ?? 0) < 1}
+            className={`header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm ${
+              !plan || (plan.redo_count ?? 0) < 1 ? 'is-disabled' : ''
+            }`}
+            aria-disabled={!plan || (plan.redo_count ?? 0) < 1}
             onClick={async () => {
+              if (!plan || (plan.redo_count ?? 0) < 1) return
               try {
                 setPlan(await api.redo())
-                setToast('Вперёд')
+                setToast('Изменение повторено')
               } catch (e) {
                 setError(e instanceof Error ? e.message : 'Ошибка')
               }
             }}
           >
-            Вперёд → ({plan?.redo_count ?? 0})
+            Повторить → ({plan?.redo_count ?? 0})
           </button>
           <button
             type="button"
-            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+            className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
             onClick={() => fileRef.current?.click()}
           >
-            Excel ↑
+            Импорт Excel
           </button>
           <input
             ref={fileRef}
@@ -264,7 +270,7 @@ export default function App() {
           />
           <button
             type="button"
-            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+            className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
             onClick={async () => {
               const { blob, filename } = await api.exportExcel()
               const url = URL.createObjectURL(blob)
@@ -275,25 +281,25 @@ export default function App() {
               URL.revokeObjectURL(url)
             }}
           >
-            Excel ↓
+            Экспорт Excel
           </button>
           <button
             type="button"
-            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+            className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
             onClick={() => setResetConfirmOpen(true)}
           >
-            Сброс демо
+            Сбросить демо
           </button>
           <button
             type="button"
-            className="rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+            className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
             onClick={() => setJournalOpen(true)}
           >
-            Журнал агента
+            Журнал ассистента
           </button>
           <button
             type="button"
-            className="rounded-lg px-3 py-1.5 text-sm text-[var(--muted)]"
+            className="header-action rounded-lg px-3 py-1.5 text-sm text-[var(--muted)]"
             onClick={async () => {
               await api.logout()
               setUser(null)
@@ -371,10 +377,10 @@ export default function App() {
                     ),
                   )
                 }}
-                onSend={async (text) => {
+                onSend={async (text, file) => {
                   setError('')
                   try {
-                    const { job_id } = await api.chat(text)
+                    const { job_id } = await api.chat(text, file)
                     await refresh()
                     await pollJob(job_id)
                   } catch (e) {
@@ -390,7 +396,7 @@ export default function App() {
       {!chatOpen && (
         <button
           type="button"
-          aria-label="Открыть чат с агентом"
+          aria-label="Открыть чат с ассистентом"
           title="Ассистент"
           className="fixed right-4 bottom-4 z-40 flex items-center gap-2 rounded-full bg-[var(--accent)] px-4 py-3 text-sm font-medium text-white shadow-lg transition hover:brightness-110"
           onClick={() => setChatOpen(true)}
@@ -430,7 +436,7 @@ export default function App() {
               Восстановить демо-план?
             </h2>
             <p className="mt-2 text-sm text-[var(--muted)]">
-              Текущие изменения будут сброшены. Чат и журнал агента тоже очистятся.
+              Текущие изменения будут сброшены. Чат и журнал ассистента тоже очистятся.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button

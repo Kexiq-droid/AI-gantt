@@ -13,6 +13,8 @@
   --danger: #b42318;
   --bar: #0f766e;
   --bar-phase: #134e4a;
+  --bar-progress: #5eead4;
+  --bar-lag: #e11d48;
   --highlight: #f59e0b;
   --shadow: 0 1px 2px rgb(28 36 34 / 6%);
   color-scheme: light;
@@ -30,6 +32,8 @@
   --danger: #f97066;
   --bar: #14b8a6;
   --bar-phase: #5eead4;
+  --bar-progress: #2dd4bf;
+  --bar-lag: #fb7185;
   --highlight: #fbbf24;
   --shadow: 0 1px 2px rgb(0 0 0 / 35%);
   color-scheme: dark;
@@ -77,4 +81,28 @@ textarea {
 .bar-highlight {
   animation: pulse-bar 1s ease-in-out 3;
   outline: 2px solid var(--highlight);
+}
+
+.header-action {
+  transition: transform 0.15s ease, filter 0.15s ease, opacity 0.15s ease;
+  transform-origin: center;
+  will-change: transform;
+}
+
+.header-action:hover {
+  transform: scale(1.07);
+  filter: brightness(1.05);
+}
+
+.header-action:active:not(.is-disabled) {
+  transform: scale(0.97);
+}
+
+.header-action.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.header-action.is-disabled:hover {
+  filter: none;
 }

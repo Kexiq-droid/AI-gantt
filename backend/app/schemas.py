@@ -25,12 +25,14 @@ class TaskOut(BaseModel):
     description: str
     assignee: str
     duration_days: int
+    progress_pct: int = 0
     start_date: date
     end_date: date
     sort_order: int
     last_changed_by: str
     updated_at: datetime | None = None
     predecessor_codes: list[str] = Field(default_factory=list)
+    has_children: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -60,6 +62,7 @@ class TaskUpdate(BaseModel):
     assignee: str | None = None
     duration_days: int | None = None
     start_date: date | None = None
+    progress_pct: int | None = None
 
 
 class TasksShiftRequest(BaseModel):

@@ -12,19 +12,17 @@ from backend.app.services.excel_io import (
     content_disposition,
     export_filename,
     export_plan_xlsx,
-    import_plan_xlsx,
 )
 from backend.app.services.plan_store import (
+    apply_imported_xlsx,
     ensure_user_plan,
     load_seed_into_plan,
     plan_to_dict,
     push_snapshot,
     restore_snapshot,
     redo_snapshot,
-    _replace_plan_content,
 )
 from backend.app.services.serializers import serialize_plan
-from backend.app.services.validate import validate_plan_dict
 
 router = APIRouter(prefix="/api/plans", tags=["plans"])
 
@@ -50,6 +48,15 @@ def update_task(
         raise HTTPException(404, "Задача не найдена")
     push_snapshot(db, plan, source="ui")
     data = body.model_dump(exclude_unset=True)
+
+    if "progress_pct" in data:
+        has_kids = any(t.parent_id == task.id for t in plan.tasks)
+        if has_kids:
+            raise HTTPException(
+                400, "Прогресс фазы считается автоматически как среднее по дочерним задачам"
+            )
+        data["progress_pct"] = max(0, min(100, int(data["progress_pct"])))
+
     old_start = task.start_date
     for k, v in data.items():
         setattr(task, k, v)
@@ -146,15 +153,11 @@ async def import_excel(
     if len(content) > 5_000_000:
         raise HTTPException(400, "Файл слишком большой")
     plan = ensure_user_plan(db, user.id)
-    try:
-        payload = import_plan_xlsx(content, plan_start=plan.start_date)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(400, f"Ошибка импорта: {exc}") from exc
-    errors = validate_plan_dict(payload)
-    if errors:
-        raise HTTPException(400, "; ".join(errors))
-    push_snapshot(db, plan, source="excel")
-    _replace_plan_content(db, plan, payload, changed_by="user")
+    ok, errors, _codes, _title = apply_imported_xlsx(
+        db, plan, content, source="excel", changed_by="user"
+    )
+    if not ok:
+        raise HTTPException(400, "; ".join(errors) if errors else "Ошибка импорта")
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)

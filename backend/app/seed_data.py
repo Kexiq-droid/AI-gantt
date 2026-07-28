@@ -29,7 +29,7 @@ SEED_TASKS: list[tuple] = [
 ]
 
 PLAN_TITLE = "Вывод препарата-кандидата BIO-X на клинические исследования (фаза I)"
-PLAN_START = date(2026, 3, 2)
+PLAN_START = date.today()
 
 
 def compute_schedule(tasks: list[dict], plan_start: date) -> dict[str, date]:

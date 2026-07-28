@@ -91,6 +91,14 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
     [range.min, range.total],
   )
 
+  const todayOffset = useMemo(() => {
+    const now = new Date()
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+    const off = daysBetween(range.min, today)
+    if (off < 0 || off >= range.total) return null
+    return off
+  }, [range.min, range.total])
+
   const hasChildren = (id: number) => (childrenMap.get(id) || []).length > 0
 
   const subtreeIds = (rootId: number): number[] => {
@@ -220,9 +228,19 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2 text-[11px] text-[var(--muted)]">
             <span className="inline-block h-3 w-3 rounded-sm" style={{ background: nonWorkingBg }} />
-            выходной
+            Выходной
             <span className="inline-block h-3 w-3 rounded-sm" style={{ background: holidayBg }} />
-            праздник РФ
+            Праздник
+            <span
+              className="inline-block h-3 w-3 rounded-sm"
+              style={{ background: 'var(--bar-progress)' }}
+            />
+            Выполнен
+            <span
+              className="inline-block h-3 w-3 rounded-sm"
+              style={{ background: 'var(--bar-lag)' }}
+            />
+            Отставание
           </div>
           <div className="flex gap-2">
             <button
@@ -230,14 +248,14 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
               className={`rounded-lg px-3 py-1.5 text-sm ${zoom === 'day' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-2)]'}`}
               onClick={() => setZoom('day')}
             >
-              Дни
+              По дням
             </button>
             <button
               type="button"
               className={`rounded-lg px-3 py-1.5 text-sm ${zoom === 'week' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-2)]'}`}
               onClick={() => setZoom('week')}
             >
-              Недели
+              По неделям
             </button>
           </div>
         </div>
@@ -332,6 +350,7 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
               <div className="relative h-[28px]">
                 {calendar.days.map((day) => {
                   const showLabel = zoom === 'day' || day.offset % 7 === 0
+                  const isToday = todayOffset === day.offset
                   return (
                     <div
                       key={`d-${day.offset}`}
@@ -344,23 +363,48 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
                           : day.weekend
                             ? nonWorkingBg
                             : undefined,
-                        color: day.nonWorking ? 'var(--danger)' : 'var(--muted)',
+                        color: isToday
+                          ? 'var(--accent)'
+                          : day.nonWorking
+                            ? 'var(--danger)'
+                            : 'var(--muted)',
                       }}
-                      title={`${day.weekday}, ${day.label}${day.holiday ? ' · праздник РФ' : day.weekend ? ' · выходной' : ''}`}
+                      title={`${day.weekday}, ${day.label}${isToday ? ' · Сегодня' : ''}${day.holiday ? ' · Праздник' : day.weekend ? ' · Выходной' : ''}`}
                     >
-                      {showLabel && (
-                        <>
-                          <span className="text-[9px] font-semibold">{day.weekday}</span>
-                          <span className="mt-0.5 text-[10px] tabular-nums tracking-tight">
-                            {String(day.date.getDate()).padStart(2, '0')}
-                          </span>
-                        </>
+                      {isToday ? (
+                        <span className="px-0.5 text-center text-[8px] font-bold uppercase leading-tight tracking-wide">
+                          Сегодня
+                        </span>
+                      ) : (
+                        showLabel && (
+                          <>
+                            <span className="text-[9px] font-semibold">{day.weekday}</span>
+                            <span className="mt-0.5 text-[10px] tabular-nums tracking-tight">
+                              {String(day.date.getDate()).padStart(2, '0')}
+                            </span>
+                          </>
+                        )
                       )}
                     </div>
                   )
                 })}
               </div>
             </div>
+
+            {todayOffset != null && (
+              <div
+                className="pointer-events-none absolute z-[3]"
+                style={{
+                  top: 0,
+                  left: todayOffset * pxPerDay + pxPerDay / 2 - 1,
+                  width: 2,
+                  height: HEADER_H + flat.length * 40,
+                  background: 'var(--accent)',
+                  boxShadow: '0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent)',
+                }}
+                title="Сегодня"
+              />
+            )}
 
             <svg
               className="pointer-events-none absolute left-0 z-[1]"
@@ -398,6 +442,20 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
                 const isPhase = hasChildren(task.id)
                 const hl = highlightCodes.includes(task.code)
                 const isSelected = selectedSet.has(task.id)
+                const progress = Math.max(0, Math.min(100, task.progress_pct ?? 0))
+                // Expected progress by calendar (portion of bar left of today)
+                let expected = 0
+                if (todayOffset != null) {
+                  const startOff = daysBetween(range.min, parseDate(task.start_date))
+                  const endOff = startOff + Math.max(task.duration_days, 1)
+                  if (todayOffset >= endOff) expected = 100
+                  else if (todayOffset > startOff) {
+                    expected = ((todayOffset - startOff) / Math.max(task.duration_days, 1)) * 100
+                  }
+                }
+                const doneW = (progress / 100) * width
+                const lagW =
+                  progress < expected ? ((expected - progress) / 100) * width : 0
                 return (
                   <div
                     key={task.id}
@@ -405,17 +463,17 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
                   >
                     <div
                       data-bar-id={task.id}
-                      className={`absolute top-2 h-6 cursor-grab rounded-md active:cursor-grabbing ${hl ? 'bar-highlight' : ''}`}
+                      className={`absolute top-2 h-6 cursor-grab overflow-hidden rounded-md active:cursor-grabbing ${hl ? 'bar-highlight' : ''}`}
                       style={{
                         left,
                         width,
                         background: isPhase ? 'var(--bar-phase)' : 'var(--bar)',
-                        opacity: isPhase ? 0.85 : 1,
+                        opacity: isPhase ? 0.9 : 1,
                         outline: isSelected ? '2px dashed var(--accent)' : undefined,
                         outlineOffset: isSelected ? 2 : undefined,
                         zIndex: isSelected ? 2 : 1,
                       }}
-                      title={`${task.code}: ${task.start_date} → ${task.end_date}${isPhase ? ' (фаза: сдвиг с дочерними)' : ''}`}
+                      title={`${task.code}: ${task.start_date} → ${task.end_date} · ${Math.round(progress)}%${isPhase ? ' (фаза)' : ''}${lagW > 0 ? ' · отставание' : ''}`}
                       onPointerDown={(e) => {
                         if (e.button !== 0) return
                         e.preventDefault()
@@ -456,7 +514,33 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
                           ctrlToggle: false,
                         }
                       }}
-                    />
+                    >
+                      {doneW > 0 && (
+                        <div
+                          className="absolute top-0 left-0 h-full"
+                          style={{
+                            width: doneW,
+                            background: 'var(--bar-progress)',
+                          }}
+                        />
+                      )}
+                      {lagW > 0 && (
+                        <div
+                          className="absolute top-0 h-full"
+                          style={{
+                            left: doneW,
+                            width: lagW,
+                            background: 'var(--bar-lag)',
+                            opacity: 0.85,
+                          }}
+                        />
+                      )}
+                      {width >= 36 && (
+                        <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold text-white/90 drop-shadow">
+                          {Math.round(progress)}%
+                        </span>
+                      )}
+                    </div>
                     <span className="sr-only">{idx}</span>
                   </div>
                 )

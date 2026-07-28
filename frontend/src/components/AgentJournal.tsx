@@ -4,6 +4,21 @@ import type { AgentJob, AgentStats } from '../types'
 
 type Props = { open: boolean; onClose: () => void }
 
+function statusLabel(status: string) {
+  switch (status) {
+    case 'done':
+      return 'Готово'
+    case 'failed':
+      return 'Ошибка'
+    case 'running':
+      return 'В работе'
+    case 'queued':
+      return 'В очереди'
+    default:
+      return status
+  }
+}
+
 export function AgentJournal({ open, onClose }: Props) {
   const [runs, setRuns] = useState<AgentJob[]>([])
   const [stats, setStats] = useState<AgentStats | null>(null)
@@ -26,21 +41,22 @@ export function AgentJournal({ open, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-[var(--border)] px-4 py-3">
-          <h2 className="text-lg">Журнал агента</h2>
+          <h2 className="text-lg">Журнал ассистента</h2>
           <button type="button" onClick={onClose}>
             ✕
           </button>
         </div>
         {stats && (
           <div className="grid grid-cols-2 gap-2 border-b border-[var(--border)] p-4 text-sm">
-            <div>Прогонов: {stats.total}</div>
-            <div>Success: {(stats.success_rate * 100).toFixed(0)}%</div>
-            <div>Validate fail: {(stats.validate_fail_rate * 100).toFixed(0)}%</div>
-            <div>Возврат&lt;5м: {(stats.undo_after_agent_rate * 100).toFixed(0)}%</div>
+            <div>Запросов: {stats.total}</div>
+            <div>Успешно: {(stats.success_rate * 100).toFixed(0)}%</div>
+            <div>Ошибки проверки: {(stats.validate_fail_rate * 100).toFixed(0)}%</div>
+            <div>Отменено за 5 мин: {(stats.undo_after_agent_rate * 100).toFixed(0)}%</div>
             <div>👍 {stats.ratings_up}</div>
             <div>👎 {stats.ratings_down}</div>
             <div className="col-span-2 text-[var(--muted)]">
-              Avg latency: {stats.avg_latency_ms != null ? `${Math.round(stats.avg_latency_ms)} ms` : '—'}
+              Среднее время:{' '}
+              {stats.avg_latency_ms != null ? `${Math.round(stats.avg_latency_ms)} мс` : '—'}
             </div>
           </div>
         )}
@@ -50,10 +66,10 @@ export function AgentJournal({ open, onClose }: Props) {
               <tr>
                 <th className="px-3 py-2">ID</th>
                 <th className="px-3 py-2">Статус</th>
-                <th className="px-3 py-2">ms</th>
-                <th className="px-3 py-2">✓</th>
-                <th className="px-3 py-2">↩</th>
-                <th className="px-3 py-2">★</th>
+                <th className="px-3 py-2">мс</th>
+                <th className="px-3 py-2">Проверка</th>
+                <th className="px-3 py-2">Отмена</th>
+                <th className="px-3 py-2">Оценка</th>
               </tr>
             </thead>
             <tbody>
@@ -64,12 +80,12 @@ export function AgentJournal({ open, onClose }: Props) {
                   onClick={() => setSelected(r)}
                 >
                   <td className="px-3 py-2">{r.id}</td>
-                  <td className="px-3 py-2">{r.status}</td>
+                  <td className="px-3 py-2">{statusLabel(r.status)}</td>
                   <td className="px-3 py-2">{r.latency_ms ?? '—'}</td>
                   <td className="px-3 py-2">
-                    {r.validate_ok == null ? '—' : r.validate_ok ? 'ok' : 'fail'}
+                    {r.validate_ok == null ? '—' : r.validate_ok ? 'ок' : 'ошибка'}
                   </td>
-                  <td className="px-3 py-2">{r.undone_within_5m ? 'yes' : ''}</td>
+                  <td className="px-3 py-2">{r.undone_within_5m ? 'да' : ''}</td>
                   <td className="px-3 py-2">
                     {r.rating === 'up' ? '👍' : r.rating === 'down' ? '👎' : ''}
                   </td>
@@ -80,7 +96,7 @@ export function AgentJournal({ open, onClose }: Props) {
         </div>
         {selected && (
           <div className="max-h-64 overflow-auto border-t border-[var(--border)] p-4 text-xs">
-            <div className="mb-2 font-medium">Job #{selected.id}</div>
+            <div className="mb-2 font-medium">Запрос #{selected.id}</div>
             <div className="mb-2 text-[var(--muted)]">{selected.request_text}</div>
             <pre className="whitespace-pre-wrap">{JSON.stringify(selected, null, 2)}</pre>
           </div>

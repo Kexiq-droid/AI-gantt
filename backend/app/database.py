@@ -44,7 +44,7 @@ def init_db() -> None:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
 
-    # lightweight migrate: plan_snapshots.kind
+    # lightweight migrate: plan_snapshots.kind + agent_jobs attachments
     try:
         insp = inspect(engine)
         if "plan_snapshots" in insp.get_table_names():
@@ -59,6 +59,33 @@ def init_db() -> None:
                     )
                     conn.execute(
                         text("UPDATE plan_snapshots SET kind = 'undo' WHERE kind IS NULL")
+                    )
+        if "agent_jobs" in insp.get_table_names():
+            cols = {c["name"] for c in insp.get_columns("agent_jobs")}
+            with engine.begin() as conn:
+                if "attachment_path" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE agent_jobs ADD COLUMN attachment_path VARCHAR(512)"
+                        )
+                    )
+                if "attachment_name" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE agent_jobs ADD COLUMN attachment_name VARCHAR(255)"
+                        )
+                    )
+        if "tasks" in insp.get_table_names():
+            cols = {c["name"] for c in insp.get_columns("tasks")}
+            if "progress_pct" not in cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE tasks ADD COLUMN progress_pct INTEGER DEFAULT 0"
+                        )
+                    )
+                    conn.execute(
+                        text("UPDATE tasks SET progress_pct = 0 WHERE progress_pct IS NULL")
                     )
     except Exception:
         pass

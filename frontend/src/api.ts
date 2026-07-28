@@ -75,11 +75,16 @@ export const api = {
       headers: {},
     })
   },
-  chat: (message: string) =>
-    request<{ job_id: number }>('/api/chat', {
+  chat: (message: string, file?: File | null) => {
+    const fd = new FormData()
+    fd.append('message', message)
+    if (file) fd.append('file', file)
+    return request<{ job_id: number }>('/api/chat', {
       method: 'POST',
-      body: JSON.stringify({ message }),
-    }),
+      body: fd,
+      headers: {},
+    })
+  },
   messages: () => request<import('./types').ChatMessage[]>('/api/chat/messages'),
   job: (id: number) => request<import('./types').AgentJob>(`/api/jobs/${id}`),
   runs: () => request<import('./types').AgentJob[]>('/api/agent/runs'),

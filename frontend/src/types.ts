@@ -7,11 +7,13 @@ export type Task = {
   description: string
   assignee: string
   duration_days: number
+  progress_pct: number
   start_date: string
   end_date: string
   sort_order: number
   last_changed_by: string
   predecessor_codes: string[]
+  has_children: boolean
 }
 
 export type Plan = {
@@ -37,7 +39,12 @@ export type ChatMessage = {
   role: string
   content: string
   job_id: number | null
-  meta: { changes?: string[]; tool_calls?: unknown[]; rating?: 'up' | 'down' } | null
+  meta: {
+    changes?: string[]
+    tool_calls?: unknown[]
+    rating?: 'up' | 'down'
+    attachment_name?: string
+  } | null
   created_at: string
 }
 

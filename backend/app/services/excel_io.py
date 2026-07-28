@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -14,13 +14,50 @@ from openpyxl.utils import get_column_letter
 
 from backend.app.seed_data import compute_schedule
 
-HEADERS = ["код", "задача", "описание", "исполнитель", "длительность", "предшественники", "родитель"]
+HEADERS = [
+    "код",
+    "задача",
+    "описание",
+    "исполнитель",
+    "длительность",
+    "% выполнения",
+    "дата начала",
+    "дата конца",
+    "предшественники",
+    "родитель",
+]
 HEADER_ALIASES = {
     "код": ("код", "code"),
     "задача": ("задача", "title", "название"),
     "описание": ("описание", "description"),
     "исполнитель": ("исполнитель", "assignee"),
     "длительность": ("длительность", "duration", "duration_days"),
+    "% выполнения": (
+        "% выполнения",
+        "прогресс",
+        "progress",
+        "progress_pct",
+        "%",
+        "выполнение",
+    ),
+    "дата начала": (
+        "дата начала",
+        "начало",
+        "start",
+        "start_date",
+        "start date",
+        "дата старта",
+    ),
+    "дата конца": (
+        "дата конца",
+        "конец",
+        "окончание",
+        "end",
+        "end_date",
+        "finish",
+        "finish_date",
+        "дата окончания",
+    ),
     "предшественники": ("предшественники", "predecessors"),
     "родитель": ("родитель", "parent"),
 }
@@ -42,11 +79,19 @@ COL_WIDTHS = {
     "C": 48,   # описание
     "D": 16,   # исполнитель
     "E": 13,   # длительность
-    "F": 20,   # предшественники
-    "G": 12,   # родитель
+    "F": 12,   # % выполнения
+    "G": 14,   # дата начала
+    "H": 14,   # дата конца
+    "I": 20,   # предшественники
+    "J": 12,   # родитель
 }
 
 HEADER_ROW = 5  # 1-based: logo/title block above
+N_COLS = len(HEADERS)
+
+
+def task_end_date(start: date, duration_days: int) -> date:
+    return start + timedelta(days=max(int(duration_days or 0), 0))
 
 
 def export_filename(plan: dict[str, Any], when: date | None = None) -> str:
@@ -63,6 +108,39 @@ def content_disposition(filename: str) -> str:
     return f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"
 
 
+def _parse_excel_date(value: Any) -> date | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    # ISO
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        pass
+    # DD.MM.YYYY / DD/MM/YYYY
+    for sep in (".", "/", "-"):
+        parts = text.split(sep)
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            a, b, c = (int(parts[0]), int(parts[1]), int(parts[2]))
+            if c > 31:  # DD.MM.YYYY
+                try:
+                    return date(c, b, a)
+                except ValueError:
+                    return None
+            if a > 31:  # YYYY-MM-DD already tried
+                try:
+                    return date(a, b, c)
+                except ValueError:
+                    return None
+    return None
+
+
 def export_plan_xlsx(plan: dict[str, Any]) -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -77,24 +155,25 @@ def export_plan_xlsx(plan: dict[str, Any]) -> bytes:
     body_font = Font(name="Calibri", color=TEXT, size=11)
     title_font = Font(name="Calibri", bold=True, color=ACCENT, size=16)
     meta_font = Font(name="Calibri", color=MUTED, size=10)
+    last_col = get_column_letter(N_COLS)
 
     # —— Brand header ——
-    ws.merge_cells("C1:G1")
+    ws.merge_cells(f"C1:{last_col}1")
     ws["C1"] = "R&D планирование"
     ws["C1"].font = title_font
     ws["C1"].alignment = Alignment(vertical="center")
 
-    ws.merge_cells("A2:G2")
+    ws.merge_cells(f"A2:{last_col}2")
     ws["A2"] = f"План: {plan.get('title') or 'Без названия'}"
     ws["A2"].font = Font(name="Calibri", bold=True, color=TEXT, size=12)
 
-    ws.merge_cells("A3:G3")
+    ws.merge_cells(f"A3:{last_col}3")
     exported_at = datetime.now().strftime("%d.%m.%Y %H:%M")
     ws["A3"] = f"Экспорт: {exported_at}"
     ws["A3"].font = meta_font
 
     # Accent strip under brand block
-    for col in range(1, 8):
+    for col in range(1, N_COLS + 1):
         cell = ws.cell(row=4, column=col, value="")
         cell.fill = PatternFill("solid", fgColor=ACCENT)
     ws.row_dimensions[1].height = 36
@@ -126,12 +205,20 @@ def export_plan_xlsx(plan: dict[str, Any]) -> bytes:
     for i, t in enumerate(plan.get("tasks") or []):
         row = HEADER_ROW + 1 + i
         is_phase = not t.get("parent")
+        start = _parse_excel_date(t.get("start_date"))
+        duration = int(t.get("duration_days") or 1)
+        end = _parse_excel_date(t.get("end_date"))
+        if start and not end:
+            end = task_end_date(start, duration)
         values = [
             t["code"],
             t["title"],
             t.get("description") or "",
             t.get("assignee") or "",
-            t.get("duration_days") or 1,
+            duration,
+            max(0, min(100, int(t.get("progress_pct") or 0))),
+            start,
+            end,
             ",".join(t.get("predecessors") or []),
             t.get("parent") or "",
         ]
@@ -147,8 +234,10 @@ def export_plan_xlsx(plan: dict[str, Any]) -> bytes:
                 vertical="center",
                 wrap_text=wrap,
                 indent=indent,
+                horizontal="center" if col_idx in (5, 6, 7, 8) else "general",
             )
-        # Description rows get a bit more height when long
+            if col_idx in (7, 8) and isinstance(value, date):
+                cell.number_format = "DD.MM.YYYY"
         desc = str(t.get("description") or "")
         if len(desc) > 60:
             ws.row_dimensions[row].height = 36
@@ -163,17 +252,17 @@ def export_plan_xlsx(plan: dict[str, Any]) -> bytes:
         ws.column_dimensions[letter].width = width
 
     ws.freeze_panes = f"A{HEADER_ROW + 1}"
-    ws.auto_filter.ref = f"A{HEADER_ROW}:{get_column_letter(len(HEADERS))}{max(last_data_row, HEADER_ROW)}"
+    ws.auto_filter.ref = f"A{HEADER_ROW}:{last_col}{max(last_data_row, HEADER_ROW)}"
     ws.print_title_rows = f"{HEADER_ROW}:{HEADER_ROW}"
 
-    # Soft note for importers (ignored by our importer — no code column)
     note_row = last_data_row + 2
-    ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=7)
+    ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=N_COLS)
     note = ws.cell(
         row=note_row,
         column=1,
-        value="Подсказка: при импорте сохраните строку заголовков (код, задача, …). "
-        "Строки шапки BioPlan можно оставить — они пропускаются.",
+        value="Подсказка: при импорте сохраните заголовки. "
+        "Колонки «дата начала» / «дата конца» задают сроки; "
+        "если их нет — даты считаются по длительности и предшественникам.",
     )
     note.font = Font(name="Calibri", italic=True, color=MUTED, size=9)
 
@@ -192,6 +281,20 @@ def _find_header_row(rows: list[tuple[Any, ...]]) -> tuple[int, list[str]]:
     raise ValueError("Не найдена строка заголовков (ожидаются колонки «код», «задача», …)")
 
 
+def _col_index(header: list[str], *names: str) -> int:
+    for n in names:
+        if n in header:
+            return header.index(n)
+    raise ValueError(f"Нет колонки {names[0]}")
+
+
+def _optional_col(header: list[str], *names: str) -> int | None:
+    for n in names:
+        if n in header:
+            return header.index(n)
+    return None
+
+
 def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str, Any]:
     wb = load_workbook(BytesIO(content), data_only=True)
     ws = wb.active
@@ -201,19 +304,16 @@ def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str
 
     header_idx, header = _find_header_row(rows)
 
-    def col(*names: str) -> int:
-        for n in names:
-            if n in header:
-                return header.index(n)
-        raise ValueError(f"Нет колонки {names[0]}")
-
-    i_code = col(*HEADER_ALIASES["код"])
-    i_title = col(*HEADER_ALIASES["задача"])
-    i_desc = col(*HEADER_ALIASES["описание"])
-    i_assignee = col(*HEADER_ALIASES["исполнитель"])
-    i_dur = col(*HEADER_ALIASES["длительность"])
-    i_pred = col(*HEADER_ALIASES["предшественники"])
-    i_parent = col(*HEADER_ALIASES["родитель"])
+    i_code = _col_index(header, *HEADER_ALIASES["код"])
+    i_title = _col_index(header, *HEADER_ALIASES["задача"])
+    i_desc = _col_index(header, *HEADER_ALIASES["описание"])
+    i_assignee = _col_index(header, *HEADER_ALIASES["исполнитель"])
+    i_dur = _optional_col(header, *HEADER_ALIASES["длительность"])
+    i_progress = _optional_col(header, *HEADER_ALIASES["% выполнения"])
+    i_start = _optional_col(header, *HEADER_ALIASES["дата начала"])
+    i_end = _optional_col(header, *HEADER_ALIASES["дата конца"])
+    i_pred = _col_index(header, *HEADER_ALIASES["предшественники"])
+    i_parent = _col_index(header, *HEADER_ALIASES["родитель"])
 
     # Prefer title from brand header if present
     plan_title = "Импортированный план"
@@ -224,7 +324,9 @@ def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str
                 plan_title = text.split(":", 1)[1].strip() or plan_title
                 break
 
-    def cell(row: tuple[Any, ...], index: int) -> Any:
+    def cell(row: tuple[Any, ...], index: int | None) -> Any:
+        if index is None:
+            return None
         return row[index] if index < len(row) else None
 
     tasks: list[dict[str, Any]] = []
@@ -242,30 +344,76 @@ def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str
         preds = [p.strip() for p in preds_raw.replace(";", ",").split(",") if p.strip()]
         parent = str(cell(row, i_parent) or "").strip() or None
         title_raw = str(cell(row, i_title) or code)
+
+        start = _parse_excel_date(cell(row, i_start))
+        end = _parse_excel_date(cell(row, i_end))
+        dur_raw = cell(row, i_dur)
+        try:
+            duration = int(dur_raw) if dur_raw not in (None, "") else None
+        except (TypeError, ValueError):
+            duration = None
+
+        # Prefer explicit dates from Excel when present
+        if start and end and (duration is None or duration <= 0):
+            duration = max((end - start).days, 1)
+        elif start and end and duration and duration > 0:
+            # Keep duration; end in UI is derived as start+duration
+            pass
+        elif start and duration is None and end is None:
+            duration = 1
+        elif end and duration and duration > 0 and start is None:
+            start = end - timedelta(days=duration)
+        elif duration is None:
+            duration = 1
+
+        duration = max(int(duration or 1), 1)
+
+        progress = 0
+        prog_raw = cell(row, i_progress)
+        if prog_raw not in (None, ""):
+            try:
+                progress = int(float(str(prog_raw).replace("%", "").strip()))
+            except (TypeError, ValueError):
+                progress = 0
+            progress = max(0, min(100, progress))
+
         tasks.append(
             {
                 "code": code,
                 "title": title_raw.strip(),
                 "description": str(cell(row, i_desc) or "").strip(),
                 "assignee": str(cell(row, i_assignee) or "").strip(),
-                "duration_days": int(cell(row, i_dur) or 1),
+                "duration_days": duration,
+                "progress_pct": progress,
                 "predecessors": preds,
                 "parent": parent,
                 "sort_order": idx * 10,
                 "last_changed_by": "user",
+                "_explicit_start": start,
             }
         )
 
     if not tasks:
         raise ValueError("В файле нет задач для импорта")
 
-    start = plan_start or date.today()
-    starts = compute_schedule(tasks, start)
+    fallback_start = plan_start or date.today()
+    explicit_starts = [t["_explicit_start"] for t in tasks if t.get("_explicit_start")]
+    if explicit_starts:
+        fallback_start = min(explicit_starts)
+
+    # Schedule only tasks without explicit start; keep Excel dates for the rest
+    need_schedule = [t for t in tasks if not t.get("_explicit_start")]
+    computed: dict[str, date] = {}
+    if need_schedule:
+        # Provide full task list so predecessors resolve, but overwrite only missing
+        computed = compute_schedule(tasks, fallback_start)
+
     for t in tasks:
-        t["start_date"] = starts[t["code"]].isoformat()
+        start = t.pop("_explicit_start", None) or computed.get(t["code"]) or fallback_start
+        t["start_date"] = start.isoformat()
 
     return {
         "title": plan_title,
-        "start_date": start.isoformat(),
+        "start_date": fallback_start.isoformat(),
         "tasks": tasks,
     }

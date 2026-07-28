@@ -1,17 +1,19 @@
 import asyncio
 import json
+import re
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.auth import get_current_user
+from backend.app.config import ROOT
 from backend.app.database import SessionLocal, get_db
 from backend.app.models import AgentJob, ChatMessage, User
 from backend.app.schemas import (
     AgentStatsOut,
     ChatMessageOut,
-    ChatRequest,
     JobOut,
     RatingRequest,
 )
@@ -20,6 +22,9 @@ from backend.app.services.plan_store import ensure_user_plan
 from backend.app.services.serializers import job_to_dict
 
 router = APIRouter(prefix="/api", tags=["chat"])
+
+UPLOAD_DIR = ROOT / "data" / "chat_uploads"
+MAX_UPLOAD_BYTES = 5_000_000
 
 
 def _spawn_job(job_id: int) -> None:
@@ -45,22 +50,52 @@ def _spawn_job(job_id: int) -> None:
 
 @router.post("/chat")
 async def chat(
-    body: ChatRequest,
+    message: str = Form(""),
+    file: UploadFile | None = File(None),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    if not body.message.strip():
+    text = (message or "").strip()
+    has_file = file is not None and bool(file.filename)
+
+    if not text and not has_file:
         raise HTTPException(400, "Пустое сообщение")
+
+    if has_file:
+        assert file is not None
+        name = file.filename or "plan.xlsx"
+        if not name.lower().endswith(".xlsx"):
+            raise HTTPException(400, "Нужен файл .xlsx")
+        content = await file.read()
+        if len(content) > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, "Файл слишком большой")
+        if not text:
+            text = f"Импортируй план из файла «{name}»"
+    else:
+        content = b""
+        name = ""
+
     plan = ensure_user_plan(db, user.id)
-    job = AgentJob(plan_id=plan.id, status="queued", request_text=body.message.strip())
+    job = AgentJob(plan_id=plan.id, status="queued", request_text=text)
     db.add(job)
     db.flush()
+
+    if has_file:
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^\w.\-]+", "_", name)[:120] or "plan.xlsx"
+        path = UPLOAD_DIR / f"{job.id}_{safe}"
+        path.write_bytes(content)
+        job.attachment_path = str(path)
+        job.attachment_name = name
+
+    meta = {"attachment_name": name} if has_file else None
     db.add(
         ChatMessage(
             plan_id=plan.id,
             role="user",
-            content=body.message.strip(),
+            content=text,
             job_id=job.id,
+            meta_json=json.dumps(meta, ensure_ascii=False) if meta else None,
         )
     )
     db.commit()
