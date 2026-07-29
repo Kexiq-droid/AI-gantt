@@ -87,18 +87,16 @@ def test_undo_redo(login_pm):
 
 
 def test_reset_seed(login_pm):
-    plan = login_pm.get("/api/plans/current").json()
-    assert len(plan["tasks"]) > 0
     login_pm.patch(
-        f"/api/plans/tasks/{plan['tasks'][0]['id']}",
+        f"/api/plans/tasks/{login_pm.get('/api/plans/current').json()['tasks'][0]['id']}",
         json={"title": "Dirty"},
     )
     r = login_pm.post("/api/plans/current/reset-seed")
     assert r.status_code == 200
     body = r.json()
     assert body["start_date"] == date.today().isoformat()
-    assert body["title"] == "Новый проект"
-    assert body["tasks"] == []
+    assert len(body["tasks"]) > 0
+    assert any(t["code"] == "P1" for t in body["tasks"])
 
 
 def test_create_task(login_pm):

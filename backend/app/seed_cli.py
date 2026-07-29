@@ -4,7 +4,7 @@ from backend.app.auth import hash_password
 from backend.app.config import get_settings
 from backend.app.database import SessionLocal, init_db
 from backend.app.models import ChatMessage, AgentJob, PlanSnapshot, Plan, User, Dependency, Task, Assignee
-from backend.app.services.plan_store import load_empty_plan
+from backend.app.services.plan_store import load_seed_into_plan
 from sqlalchemy import select
 
 
@@ -54,9 +54,9 @@ def seed() -> None:
         )
         db.add(plan)
         db.flush()
-        load_empty_plan(db, plan)
+        load_seed_into_plan(db, plan)
         db.commit()
-        print("Seed OK: user pm + empty plan")
+        print("Seed OK: user pm + VAX-B demo plan")
     finally:
         db.close()
 

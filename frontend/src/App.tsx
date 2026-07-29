@@ -313,7 +313,7 @@ export default function App() {
               className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
               onClick={() => setResetConfirmOpen(true)}
             >
-              Очистить план
+              Сбросить демо
             </button>
           )}
           <button
@@ -534,13 +534,13 @@ export default function App() {
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
-            aria-labelledby="reset-plan-title"
+            aria-labelledby="reset-demo-title"
           >
-            <h2 id="reset-plan-title" className="text-lg font-medium">
-              Очистить план?
+            <h2 id="reset-demo-title" className="text-lg font-medium">
+              Восстановить демо-план?
             </h2>
             <p className="mt-2 text-sm text-[var(--muted)]">
-              Все задачи будут удалены. Чат и журнал ассистента тоже очистятся.
+              Текущие изменения будут сброшены. Чат и журнал ассистента тоже очистятся.
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
@@ -558,14 +558,14 @@ export default function App() {
                   try {
                     setPlan(await api.resetSeed())
                     setMessages([])
-                    setToast('План очищен')
+                    setToast('Демо-план восстановлен')
                     await refresh()
                   } catch (e) {
-                    setError(e instanceof Error ? e.message : 'Ошибка очистки')
+                    setError(e instanceof Error ? e.message : 'Ошибка сброса')
                   }
                 }}
               >
-                Очистить
+                Сбросить
               </button>
             </div>
           </div>

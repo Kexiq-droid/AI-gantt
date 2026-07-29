@@ -282,11 +282,10 @@ def ensure_user_plan(db: Session, user_id: int) -> Plan:
     plan = db.scalars(select(Plan).where(Plan.user_id == user_id)).first()
     if plan:
         return plan
-    start = empty_plan_start()
-    plan = Plan(user_id=user_id, title=EMPTY_PLAN_TITLE, start_date=start)
+    plan = Plan(user_id=user_id, title=PLAN_TITLE, start_date=PLAN_START)
     db.add(plan)
     db.flush()
-    load_empty_plan(db, plan)
+    load_seed_into_plan(db, plan)
     return plan
 
 

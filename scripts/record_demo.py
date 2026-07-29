@@ -115,20 +115,16 @@ def main() -> int:
         page.get_by_text("BioPlan", exact=False).first.wait_for()
         hold(page, 1.5)
 
-        # Start from empty plan, then import sample Excel
-        page.get_by_role("button", name="Очистить план").click()
-        dialog = page.get_by_role("dialog", name="Очистить план?")
-        dialog.get_by_role("button", name="Очистить", exact=True).click()
-        page.get_by_text("План очищен").wait_for(timeout=15_000)
-        hold(page, 1.2)
-
-        page.locator('input[type="file"][accept=".xlsx"]').set_input_files(str(XLSX))
-        page.get_by_text("План импортирован").wait_for(timeout=30_000)
-        hold(page, 2.0)
+        # Restore VAX-B demo plan
+        page.get_by_role("button", name="Сбросить демо").click()
+        dialog = page.get_by_role("dialog", name="Восстановить демо-план?")
+        dialog.get_by_role("button", name="Сбросить", exact=True).click()
+        page.get_by_text("Демо-план восстановлен").wait_for(timeout=15_000)
+        hold(page, 1.5)
 
         ensure_chat_open(page)
 
-        # Show imported Gantt briefly
+        # Show seeded Gantt briefly
         hold(page, 2.0)
 
         # 3–7. Agent prompts
