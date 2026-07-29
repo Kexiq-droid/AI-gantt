@@ -24,10 +24,10 @@
 
 **Consequences:** Не переживает multi-worker и рестарты mid-job надёжно. В Roadmap — очередь и Postgres.
 
-## ADR-004: Shared tools + MCP stdio
+## ADR-004: Shared MCP tool runtime (in-process + stdio)
 
-**Context:** Нужен «настоящий» MCP и тот же контракт для агента.
+**Context:** Нужен «настоящий» MCP и тот же контракт для UI-агента и Cursor.
 
-**Decision:** Доменная логика (`validate` / `apply_plan_patch` / snapshot) в `backend/app/services`; FastAPI-агент вызывает её напрямую; `mcp_server` экспортирует те же операции по stdio для Cursor.
+**Decision:** Доменная tool-логика в `backend/app/services/mcp_runtime.py` (`execute_tool`). FastAPI-чат вызывает runtime **in-process** (низкая латентность, без subprocess на каждый tool-call). `mcp_server` экспортирует те же public tools (+ resource `plan://current`, prompt `golden_shift_preclinical`) по **stdio** для Cursor. `apply_plan_patch` поддерживает `dry_run` и лимит `MAX_BATCH_OPS=3`.
 
-**Consequences:** Один источник правды по инвариантам; агент не зависит от subprocess MCP на каждый вызов (надёжнее на демо).
+**Consequences:** Один источник правды по инвариантам; демо надёжнее, чем MCP-client через stdio на каждый chat job. На защите формулировка: «UI и IDE — одна MCP tool surface, разный транспорт».

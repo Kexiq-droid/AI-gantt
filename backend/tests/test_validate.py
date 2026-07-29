@@ -185,3 +185,86 @@ def test_shift_empty_match_is_error():
     assert errors
     assert changes == []
     assert new_plan["tasks"][0]["start_date"] == "2026-03-01"
+
+
+def _base_plan():
+    return {
+        "title": "t",
+        "start_date": "2026-03-01",
+        "tasks": [
+            {
+                "code": "P1",
+                "parent": None,
+                "title": "Phase",
+                "duration_days": 10,
+                "start_date": "2026-03-01",
+                "sort_order": 1,
+                "predecessors": [],
+            },
+            {
+                "code": "T1.1",
+                "parent": "P1",
+                "title": "Leaf",
+                "duration_days": 5,
+                "start_date": "2026-03-01",
+                "sort_order": 2,
+                "predecessors": [],
+            },
+        ],
+    }
+
+
+def test_create_task():
+    plan = _base_plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan,
+        {
+            "operations": [
+                {
+                    "op": "create",
+                    "code": "T1.2",
+                    "parent": "P1",
+                    "title": "New leaf",
+                    "duration_days": 3,
+                    "start_date": "2026-03-06",
+                }
+            ]
+        },
+    )
+    assert not errors
+    assert "T1.2" in changes
+    assert any(t["code"] == "T1.2" for t in new_plan["tasks"])
+
+
+def test_set_deps():
+    plan = _base_plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan,
+        {"operations": [{"op": "set_deps", "code": "T1.1", "predecessors": ["P1"]}]},
+    )
+    assert not errors
+    assert changes == ["T1.1"]
+    leaf = next(t for t in new_plan["tasks"] if t["code"] == "T1.1")
+    assert leaf["predecessors"] == ["P1"]
+
+
+def test_delete_leaf():
+    plan = _base_plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan,
+        {"operations": [{"op": "delete", "code": "T1.1"}]},
+    )
+    assert not errors
+    assert "T1.1" in changes
+    assert all(t["code"] != "T1.1" for t in new_plan["tasks"])
+
+
+def test_delete_phase_with_children_fails():
+    plan = _base_plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan,
+        {"operations": [{"op": "delete", "code": "P1"}]},
+    )
+    assert errors
+    assert changes == []
+    assert any(t["code"] == "P1" for t in new_plan["tasks"])

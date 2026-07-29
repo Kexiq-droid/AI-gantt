@@ -51,7 +51,9 @@ make up            # или: systemctl start bioplan-api
 ```
 React SPA  --HTTPS-->  FastAPI (auth, plans, excel, chat, jobs)
                           |-- domain: validate + apply_plan_patch (транзакция)
-                          |-- agent loop (Timeweb / DeepSeek / OpenAI) → те же tools
+                          |-- chat: undo/redo/import — быстрые rules;
+                          |         иначе LLM: snapshot → plan_commands → apply (≤3 ops);
+                          |         без LLM — fallback на rules
                           `-- SQLite
 
 mcp_server/  (stdio MCP)  — те же tools для Cursor
@@ -78,6 +80,8 @@ TIMEWEB_MODEL=deepseek/deepseek-v4-flash
 
 ## MCP из Cursor
 
+Web-чат и Cursor используют **одну** MCP tool surface (`backend/app/services/mcp_runtime.py`): чат — in-process, IDE — stdio.
+
 ```json
 {
   "mcpServers": {
@@ -87,6 +91,7 @@ TIMEWEB_MODEL=deepseek/deepseek-v4-flash
       "cwd": "/path/to/AI-gantt",
       "env": {
         "PYTHONPATH": "/path/to/AI-gantt",
+        "DATABASE_URL": "sqlite:////path/to/AI-gantt/data/bioplan.db",
         "BIOPLAN_MCP_USER": "pm"
       }
     }
@@ -94,7 +99,11 @@ TIMEWEB_MODEL=deepseek/deepseek-v4-flash
 }
 ```
 
-Tools: `get_plan_snapshot`, `validate_plan`, `apply_plan_patch` (и связанные операции патча / импорта).
+**Tools:** `get_plan_snapshot`, `validate_plan`, `apply_plan_patch` (max 3 ops, `dry_run`), `undo_plan`, `list_overloaded_assignees`  
+**Resource:** `plan://current`  
+**Prompt:** `golden_shift_preclinical`  
+
+Excel import остаётся в web-чате (не в MCP), по ТЗ.
 
 ## Makefile
 
