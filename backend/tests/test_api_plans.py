@@ -99,3 +99,58 @@ def test_reset_seed(login_pm):
     assert body["start_date"] == PLAN_START.isoformat()
     assert PLAN_START == date.today()
     assert len(body["tasks"]) > 0
+
+
+def test_create_task(login_pm):
+    plan = login_pm.get("/api/plans/current").json()
+    parent = next(t for t in plan["tasks"] if t["code"] == "P2")
+    after = next(t for t in plan["tasks"] if t["code"] == "T2.1")
+    r = login_pm.post(
+        "/api/plans/tasks",
+        json={
+            "title": "Новая задача UI",
+            "parent_id": parent["id"],
+            "after_task_id": after["id"],
+            "duration_days": 3,
+            "assignee": "Тестов",
+            "start_date": "2026-08-01",
+        },
+    )
+    assert r.status_code == 200, r.text
+    created = next(t for t in r.json()["tasks"] if t["title"] == "Новая задача UI")
+    assert created["parent_id"] == parent["id"]
+    assert created["code"].startswith("P2.")
+    assert created["assignee"] == "Тестов"
+    assert created["start_date"] == "2026-08-01"
+    assert created["duration_days"] == 3
+    assert created["end_date"] == "2026-08-04"
+
+
+def test_delete_leaf_and_phase_forbidden(login_pm):
+    plan = login_pm.get("/api/plans/current").json()
+    leaf = next(t for t in plan["tasks"] if t["code"] == "T2.1")
+    phase = next(t for t in plan["tasks"] if t["code"] == "P2")
+    bad = login_pm.delete(f"/api/plans/tasks/{phase['id']}")
+    assert bad.status_code == 400
+    ok = login_pm.delete(f"/api/plans/tasks/{leaf['id']}")
+    assert ok.status_code == 200
+    codes = {t["code"] for t in ok.json()["tasks"]}
+    assert "T2.1" not in codes
+
+
+def test_reorder_siblings(login_pm):
+    plan = login_pm.get("/api/plans/current").json()
+    t21 = next(t for t in plan["tasks"] if t["code"] == "T2.1")
+    t22 = next(t for t in plan["tasks"] if t["code"] == "T2.2")
+    # Move T2.1 after T2.2
+    r = login_pm.post(
+        "/api/plans/tasks/reorder",
+        json={"task_id": t21["id"], "after_task_id": t22["id"]},
+    )
+    assert r.status_code == 200, r.text
+    sibs = sorted(
+        [t for t in r.json()["tasks"] if t["parent_id"] == t21["parent_id"]],
+        key=lambda t: t["sort_order"],
+    )
+    codes = [t["code"] for t in sibs]
+    assert codes.index("T2.2") < codes.index("T2.1")

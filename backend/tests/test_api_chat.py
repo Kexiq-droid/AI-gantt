@@ -157,3 +157,48 @@ def test_rating_endpoint(login_pm, SessionLocal, no_llm):
     )
     assert r.status_code == 200
     assert r.json()["rating"] == "up"
+
+
+def test_chat_jobs_serialized_per_plan(login_pm, SessionLocal, monkeypatch):
+    """Two rapid chats must not run agent jobs in parallel for one plan."""
+    import threading
+    import time
+
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def slow_run(db, job_id):  # noqa: ANN001
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.15)
+        job = db.get(AgentJob, job_id)
+        job.status = "done"
+        job.result_summary = "ok"
+        db.commit()
+        with lock:
+            active -= 1
+
+    monkeypatch.setattr("backend.app.routers.chat.run_agent_job", slow_run)
+
+    r1 = login_pm.post("/api/chat", data={"message": "первая"})
+    r2 = login_pm.post("/api/chat", data={"message": "вторая"})
+    assert r1.status_code == 200 and r2.status_code == 200
+    ids = [r1.json()["job_id"], r2.json()["job_id"]]
+
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        db = SessionLocal()
+        try:
+            jobs = [db.get(AgentJob, jid) for jid in ids]
+            if all(j and j.status == "done" for j in jobs):
+                break
+        finally:
+            db.close()
+        time.sleep(0.05)
+    else:
+        raise AssertionError("jobs did not finish")
+
+    assert max_active == 1

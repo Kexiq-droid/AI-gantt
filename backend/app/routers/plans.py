@@ -2,12 +2,26 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from backend.app.auth import get_current_user
+from backend.app.auth import get_current_user, require_editor
 from backend.app.database import get_db
-from backend.app.models import Task, User
-from backend.app.schemas import PlanOut, TaskUpdate, TasksShiftRequest
+from backend.app.models import Dependency, Task, User
+from backend.app.schemas import (
+    AssigneeCreate,
+    AssigneeOut,
+    PlanOut,
+    TaskCreate,
+    TaskUpdate,
+    TasksReorderRequest,
+    TasksShiftRequest,
+)
+from backend.app.services.assignees import (
+    delete_assignee,
+    ensure_assignee,
+    list_assignees,
+)
 from backend.app.services.excel_io import (
     content_disposition,
     export_filename,
@@ -27,9 +41,175 @@ from backend.app.services.serializers import serialize_plan
 router = APIRouter(prefix="/api/plans", tags=["plans"])
 
 
+def _siblings(plan_tasks: list[Task], parent_id: int | None) -> list[Task]:
+    sibs = [t for t in plan_tasks if t.parent_id == parent_id]
+    sibs.sort(key=lambda t: (t.sort_order, t.id))
+    return sibs
+
+
+def _renumber(sibs: list[Task]) -> None:
+    for i, t in enumerate(sibs):
+        t.sort_order = (i + 1) * 10
+        t.last_changed_by = "user"
+
+
+def _unique_code(plan_tasks: list[Task], preferred: str | None, parent: Task | None) -> str:
+    used = {t.code for t in plan_tasks}
+    if preferred:
+        code = preferred.strip()
+        if not code:
+            raise HTTPException(400, "Пустой код задачи")
+        if code in used:
+            raise HTTPException(400, f"Код {code} уже существует")
+        return code
+    if parent:
+        base = parent.code
+        n = 1
+        while f"{base}.{n}" in used:
+            n += 1
+        return f"{base}.{n}"
+    n = 1
+    while f"T{n}" in used:
+        n += 1
+    return f"T{n}"
+
+
 @router.get("/current", response_model=PlanOut)
 def get_current_plan(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     plan = ensure_user_plan(db, user.id)
+    db.commit()
+    db.refresh(plan)
+    return serialize_plan(db, plan)
+
+
+@router.post("/tasks", response_model=PlanOut)
+def create_task(
+    body: TaskCreate,
+    user: User = Depends(require_editor),
+    db: Session = Depends(get_db),
+):
+    plan = ensure_user_plan(db, user.id)
+    tasks = list(plan.tasks)
+    parent: Task | None = None
+    parent_id = body.parent_id
+
+    if body.after_task_id is not None:
+        after = db.get(Task, body.after_task_id)
+        if not after or after.plan_id != plan.id:
+            raise HTTPException(404, "after_task_id не найден")
+        if parent_id is None:
+            parent_id = after.parent_id
+        elif parent_id != after.parent_id:
+            raise HTTPException(400, "after_task_id должен быть sibling того же родителя")
+
+    if parent_id is not None:
+        parent = db.get(Task, parent_id)
+        if not parent or parent.plan_id != plan.id:
+            raise HTTPException(404, "Родитель не найден")
+
+    code = _unique_code(tasks, body.code, parent)
+    if body.start_date is not None:
+        start = body.start_date
+    else:
+        start = parent.start_date if parent else plan.start_date
+
+    push_snapshot(db, plan, source="ui")
+    sibs = _siblings(tasks, parent_id)
+    if body.after_task_id is not None:
+        idx = next((i for i, t in enumerate(sibs) if t.id == body.after_task_id), len(sibs) - 1)
+        insert_at = idx + 1
+    else:
+        insert_at = len(sibs)
+
+    new_task = Task(
+        plan_id=plan.id,
+        code=code,
+        parent_id=parent_id,
+        title=body.title.strip(),
+        description=body.description or "",
+        assignee=body.assignee or "",
+        duration_days=int(body.duration_days),
+        progress_pct=0,
+        start_date=start,
+        sort_order=0,
+        last_changed_by="user",
+    )
+    db.add(new_task)
+    db.flush()
+    ensure_assignee(db, plan.id, new_task.assignee)
+    sibs.insert(insert_at, new_task)
+    _renumber(sibs)
+    db.commit()
+    db.refresh(plan)
+    return serialize_plan(db, plan)
+
+
+@router.post("/tasks/reorder", response_model=PlanOut)
+def reorder_tasks(
+    body: TasksReorderRequest,
+    user: User = Depends(require_editor),
+    db: Session = Depends(get_db),
+):
+    if body.before_task_id is None and body.after_task_id is None:
+        raise HTTPException(400, "Нужен before_task_id или after_task_id")
+    if body.before_task_id is not None and body.after_task_id is not None:
+        raise HTTPException(400, "Укажите только before_task_id или after_task_id")
+
+    plan = ensure_user_plan(db, user.id)
+    task = db.get(Task, body.task_id)
+    if not task or task.plan_id != plan.id:
+        raise HTTPException(404, "Задача не найдена")
+
+    anchor_id = body.before_task_id if body.before_task_id is not None else body.after_task_id
+    anchor = db.get(Task, anchor_id)
+    if not anchor or anchor.plan_id != plan.id:
+        raise HTTPException(404, "Якорная задача не найдена")
+    if anchor.parent_id != task.parent_id:
+        raise HTTPException(400, "Можно менять порядок только среди задач одного родителя")
+    if anchor.id == task.id:
+        return serialize_plan(db, plan)
+
+    push_snapshot(db, plan, source="ui")
+    sibs = _siblings(list(plan.tasks), task.parent_id)
+    sibs = [t for t in sibs if t.id != task.id]
+    if body.before_task_id is not None:
+        idx = next(i for i, t in enumerate(sibs) if t.id == body.before_task_id)
+        sibs.insert(idx, task)
+    else:
+        idx = next(i for i, t in enumerate(sibs) if t.id == body.after_task_id)
+        sibs.insert(idx + 1, task)
+    _renumber(sibs)
+    db.commit()
+    db.refresh(plan)
+    return serialize_plan(db, plan)
+
+
+@router.delete("/tasks/{task_id}", response_model=PlanOut)
+def delete_task(
+    task_id: int,
+    user: User = Depends(require_editor),
+    db: Session = Depends(get_db),
+):
+    plan = ensure_user_plan(db, user.id)
+    task = db.get(Task, task_id)
+    if not task or task.plan_id != plan.id:
+        raise HTTPException(404, "Задача не найдена")
+    children = [t for t in plan.tasks if t.parent_id == task.id]
+    if children:
+        raise HTTPException(
+            400,
+            f"Нельзя удалить {task.code}: есть дочерние задачи. Сначала удалите их.",
+        )
+
+    push_snapshot(db, plan, source="ui")
+    db.query(Dependency).filter(
+        Dependency.plan_id == plan.id,
+        or_(
+            Dependency.predecessor_task_id == task_id,
+            Dependency.successor_task_id == task_id,
+        ),
+    ).delete(synchronize_session=False)
+    db.delete(task)
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -39,7 +219,7 @@ def get_current_plan(user: User = Depends(get_current_user), db: Session = Depen
 def update_task(
     task_id: int,
     body: TaskUpdate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_editor),
     db: Session = Depends(get_db),
 ):
     plan = ensure_user_plan(db, user.id)
@@ -61,6 +241,8 @@ def update_task(
     for k, v in data.items():
         setattr(task, k, v)
     task.last_changed_by = "user"
+    if "assignee" in data:
+        ensure_assignee(db, plan.id, task.assignee)
 
     # Сдвиг фазы/родителя — двигаем всё поддерево на тот же delta
     if "start_date" in data and task.start_date != old_start:
@@ -86,7 +268,7 @@ def update_task(
 @router.post("/tasks/shift", response_model=PlanOut)
 def shift_tasks(
     body: TasksShiftRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_editor),
     db: Session = Depends(get_db),
 ):
     """Shift tasks (and their subtrees) by the same number of days. Dedupes ancestors."""
@@ -144,7 +326,7 @@ def shift_tasks(
 @router.post("/current/import", response_model=PlanOut)
 async def import_excel(
     file: UploadFile = File(...),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_editor),
     db: Session = Depends(get_db),
 ):
     if not file.filename or not file.filename.lower().endswith(".xlsx"):
@@ -177,7 +359,7 @@ def export_excel(user: User = Depends(get_current_user), db: Session = Depends(g
 
 
 @router.post("/current/undo", response_model=PlanOut)
-def undo(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def undo(user: User = Depends(require_editor), db: Session = Depends(get_db)):
     plan = ensure_user_plan(db, user.id)
     ok = restore_snapshot(db, plan)
     if not ok:
@@ -188,7 +370,7 @@ def undo(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
 
 
 @router.post("/current/redo", response_model=PlanOut)
-def redo(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def redo(user: User = Depends(require_editor), db: Session = Depends(get_db)):
     plan = ensure_user_plan(db, user.id)
     ok = redo_snapshot(db, plan)
     if not ok:
@@ -198,15 +380,53 @@ def redo(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return serialize_plan(db, plan)
 
 
-@router.post("/current/reset-seed", response_model=PlanOut)
-def reset_seed(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+@router.get("/assignees", response_model=list[AssigneeOut])
+def get_assignees(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     plan = ensure_user_plan(db, user.id)
-    from backend.app.models import AgentJob, ChatMessage, PlanSnapshot
+    rows = list_assignees(db, plan)
+    db.commit()
+    return rows
+
+
+@router.post("/assignees", response_model=AssigneeOut)
+def create_assignee(
+    body: AssigneeCreate,
+    user: User = Depends(require_editor),
+    db: Session = Depends(get_db),
+):
+    plan = ensure_user_plan(db, user.id)
+    row = ensure_assignee(db, plan.id, body.name)
+    if not row:
+        raise HTTPException(400, "Пустое имя исполнителя")
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+@router.delete("/assignees/{assignee_id}")
+def remove_assignee(
+    assignee_id: int,
+    user: User = Depends(require_editor),
+    db: Session = Depends(get_db),
+):
+    plan = ensure_user_plan(db, user.id)
+    ok = delete_assignee(db, plan, assignee_id)
+    if not ok:
+        raise HTTPException(404, "Исполнитель не найден")
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/current/reset-seed", response_model=PlanOut)
+def reset_seed(user: User = Depends(require_editor), db: Session = Depends(get_db)):
+    plan = ensure_user_plan(db, user.id)
+    from backend.app.models import AgentJob, Assignee, ChatMessage, PlanSnapshot
     from sqlalchemy import delete
 
     db.execute(delete(ChatMessage).where(ChatMessage.plan_id == plan.id))
     db.execute(delete(AgentJob).where(AgentJob.plan_id == plan.id))
     db.execute(delete(PlanSnapshot).where(PlanSnapshot.plan_id == plan.id))
+    db.execute(delete(Assignee).where(Assignee.plan_id == plan.id))
     load_seed_into_plan(db, plan)
     db.commit()
     db.refresh(plan)

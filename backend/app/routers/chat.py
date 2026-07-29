@@ -1,13 +1,13 @@
 import asyncio
 import json
 import re
-from pathlib import Path
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from backend.app.auth import get_current_user
+from backend.app.auth import get_current_user, require_editor
 from backend.app.config import ROOT
 from backend.app.database import SessionLocal, get_db
 from backend.app.models import AgentJob, ChatMessage, User
@@ -26,33 +26,29 @@ router = APIRouter(prefix="/api", tags=["chat"])
 UPLOAD_DIR = ROOT / "data" / "chat_uploads"
 MAX_UPLOAD_BYTES = 5_000_000
 
+# Per-plan single-flight: jobs for the same plan never run in parallel.
+_plan_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-def _spawn_job(job_id: int) -> None:
-    async def _runner():
-        await asyncio.to_thread(_run_sync, job_id)
 
-    def _run_sync(jid: int):
-        db = SessionLocal()
-        try:
-            run_agent_job(db, jid)
-        finally:
-            db.close()
-
+def _run_job_sync(job_id: int) -> None:
+    db = SessionLocal()
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            asyncio.create_task(_runner())
-        else:
-            loop.run_until_complete(_runner())
-    except RuntimeError:
-        asyncio.get_event_loop().create_task(_runner())
+        run_agent_job(db, job_id)
+    finally:
+        db.close()
+
+
+async def _run_job_serialized(plan_id: int, job_id: int) -> None:
+    lock = _plan_locks[plan_id]
+    async with lock:
+        await asyncio.to_thread(_run_job_sync, job_id)
 
 
 @router.post("/chat")
 async def chat(
     message: str = Form(""),
     file: UploadFile | None = File(None),
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_editor),
     db: Session = Depends(get_db),
 ):
     text = (message or "").strip()
@@ -101,17 +97,7 @@ async def chat(
     db.commit()
     db.refresh(job)
 
-    async def _bg():
-        await asyncio.to_thread(_sync, job.id)
-
-    def _sync(jid: int):
-        s = SessionLocal()
-        try:
-            run_agent_job(s, jid)
-        finally:
-            s.close()
-
-    asyncio.create_task(_bg())
+    asyncio.create_task(_run_job_serialized(plan.id, job.id))
     return {"job_id": job.id}
 
 
@@ -206,7 +192,7 @@ def agent_stats(user: User = Depends(get_current_user), db: Session = Depends(ge
 def rate_job(
     job_id: int,
     body: RatingRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(require_editor),
     db: Session = Depends(get_db),
 ):
     plan = ensure_user_plan(db, user.id)

@@ -59,3 +59,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Пользователь не найден")
     return user
+
+
+def require_editor(user: User = Depends(get_current_user)) -> User:
+    """Mutating endpoints: viewer is read-only."""
+    role = (user.role or "editor").strip().lower()
+    if role == "viewer":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Режим просмотра: изменение плана недоступно",
+        )
+    return user

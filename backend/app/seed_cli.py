@@ -3,7 +3,7 @@
 from backend.app.auth import hash_password
 from backend.app.config import get_settings
 from backend.app.database import SessionLocal, init_db
-from backend.app.models import ChatMessage, AgentJob, PlanSnapshot, Plan, User, Dependency, Task
+from backend.app.models import ChatMessage, AgentJob, PlanSnapshot, Plan, User, Dependency, Task, Assignee
 from backend.app.services.plan_store import ensure_user_plan, load_seed_into_plan
 from sqlalchemy import select
 
@@ -13,17 +13,18 @@ def seed() -> None:
     settings = get_settings()
     db = SessionLocal()
     try:
-        for login, password in (
-            ("pm", settings.demo_pm_password),
-            ("viewer", settings.demo_viewer_password),
+        for login, password, role in (
+            ("pm", settings.demo_pm_password, "editor"),
+            ("viewer", settings.demo_viewer_password, "viewer"),
         ):
             user = db.scalars(select(User).where(User.login == login)).first()
             if not user:
-                user = User(login=login, password_hash=hash_password(password))
+                user = User(login=login, password_hash=hash_password(password), role=role)
                 db.add(user)
                 db.flush()
             else:
                 user.password_hash = hash_password(password)
+                user.role = role
 
             # wipe plan-related for clean seed
             plans = db.scalars(select(Plan).where(Plan.user_id == user.id)).all()
@@ -32,6 +33,7 @@ def seed() -> None:
                 db.query(AgentJob).filter(AgentJob.plan_id == plan.id).delete()
                 db.query(PlanSnapshot).filter(PlanSnapshot.plan_id == plan.id).delete()
                 db.query(Dependency).filter(Dependency.plan_id == plan.id).delete()
+                db.query(Assignee).filter(Assignee.plan_id == plan.id).delete()
                 db.query(Task).filter(Task.plan_id == plan.id).delete()
                 db.delete(plan)
             db.flush()

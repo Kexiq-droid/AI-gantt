@@ -38,6 +38,39 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
+  createTask: (body: {
+    title: string
+    parent_id?: number | null
+    after_task_id?: number | null
+    description?: string
+    assignee?: string
+    duration_days?: number
+    start_date?: string
+    code?: string
+  }) =>
+    request<import('./types').Plan>('/api/plans/tasks', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  assignees: () => request<import('./types').Assignee[]>('/api/plans/assignees'),
+  createAssignee: (name: string) =>
+    request<import('./types').Assignee>('/api/plans/assignees', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+  deleteAssignee: (id: number) =>
+    request<{ ok: boolean }>(`/api/plans/assignees/${id}`, { method: 'DELETE' }),
+  deleteTask: (id: number) =>
+    request<import('./types').Plan>(`/api/plans/tasks/${id}`, { method: 'DELETE' }),
+  reorderTasks: (body: {
+    task_id: number
+    before_task_id?: number | null
+    after_task_id?: number | null
+  }) =>
+    request<import('./types').Plan>('/api/plans/tasks/reorder', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
   shiftTasks: (taskIds: number[], days: number) =>
     request<import('./types').Plan>('/api/plans/tasks/shift', {
       method: 'POST',

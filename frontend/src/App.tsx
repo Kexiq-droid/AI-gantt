@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from './api'
 import { AgentJournal } from './components/AgentJournal'
+import { AssigneesModal } from './components/AssigneesModal'
 import { ChatPanel } from './components/ChatPanel'
+import { CreateTaskModal, type CreateTaskContext } from './components/CreateTaskModal'
 import { GanttChart } from './components/GanttChart'
 import { TaskModal } from './components/TaskModal'
 import { LoginPage } from './LoginPage'
-import type { ChatMessage, Plan, Task, User } from './types'
+import type { Assignee, ChatMessage, Plan, Task, User } from './types'
 
 function getTheme(): 'light' | 'dark' {
   const saved = localStorage.getItem('bioplan-theme')
@@ -44,6 +46,9 @@ export default function App() {
   const [plan, setPlan] = useState<Plan | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [selected, setSelected] = useState<Task | null>(null)
+  const [createCtx, setCreateCtx] = useState<CreateTaskContext | null>(null)
+  const [assignees, setAssignees] = useState<Assignee[]>([])
+  const [assigneesOpen, setAssigneesOpen] = useState(false)
   const [highlight, setHighlight] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
   const [toast, setToast] = useState('')
@@ -89,11 +94,14 @@ export default function App() {
   }, [])
 
   const refresh = useCallback(async () => {
-    const [p, m] = await Promise.all([api.plan(), api.messages()])
+    const [p, m, a] = await Promise.all([api.plan(), api.messages(), api.assignees()])
     setPlan(p)
     setMessages(m)
-    return { p, m }
+    setAssignees(a)
+    return { p, m, a }
   }, [])
+
+  const assigneeOptions = assignees.map((a) => a.name)
 
   useEffect(() => {
     api
@@ -195,11 +203,16 @@ export default function App() {
     )
   }
 
+  const canEdit = user.role !== 'viewer'
+
   return (
     <div className="flex h-full flex-col">
       <header className="flex flex-wrap items-center gap-3 border-b border-[var(--border)] bg-[var(--surface)] px-4 py-3">
         <div className="brand text-2xl text-[var(--accent)]">BioPlan</div>
-        <div className="text-sm text-[var(--muted)]">/{user.login}</div>
+        <div className="text-sm text-[var(--muted)]">
+          /{user.login}
+          {!canEdit && <span className="ml-2 text-[var(--accent)]">· просмотр</span>}
+        </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -208,66 +221,77 @@ export default function App() {
           >
             {theme === 'light' ? 'Тёмная тема' : 'Светлая тема'}
           </button>
-          <button
-            type="button"
-            className={`header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm ${
-              !plan || plan.undo_count < 1 ? 'is-disabled' : ''
-            }`}
-            aria-disabled={!plan || plan.undo_count < 1}
-            onClick={async () => {
-              if (!plan || plan.undo_count < 1) return
-              try {
-                setPlan(await api.undo())
-                setToast('Изменение отменено')
-              } catch (e) {
-                setError(e instanceof Error ? e.message : 'Ошибка')
-              }
-            }}
-          >
-            ← Отменить ({plan?.undo_count ?? 0})
-          </button>
-          <button
-            type="button"
-            className={`header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm ${
-              !plan || (plan.redo_count ?? 0) < 1 ? 'is-disabled' : ''
-            }`}
-            aria-disabled={!plan || (plan.redo_count ?? 0) < 1}
-            onClick={async () => {
-              if (!plan || (plan.redo_count ?? 0) < 1) return
-              try {
-                setPlan(await api.redo())
-                setToast('Изменение повторено')
-              } catch (e) {
-                setError(e instanceof Error ? e.message : 'Ошибка')
-              }
-            }}
-          >
-            Повторить → ({plan?.redo_count ?? 0})
-          </button>
-          <button
-            type="button"
-            className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
-            onClick={() => fileRef.current?.click()}
-          >
-            Импорт Excel
-          </button>
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".xlsx"
-            className="hidden"
-            onChange={async (e) => {
-              const file = e.target.files?.[0]
-              e.target.value = ''
-              if (!file) return
-              try {
-                setPlan(await api.importExcel(file))
-                setToast('План импортирован')
-              } catch (err) {
-                setError(err instanceof Error ? err.message : 'Импорт не удался')
-              }
-            }}
-          />
+          {canEdit && (
+            <>
+              <button
+                type="button"
+                className={`header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm ${
+                  !plan || plan.undo_count < 1 ? 'is-disabled' : ''
+                }`}
+                aria-disabled={!plan || plan.undo_count < 1}
+                onClick={async () => {
+                  if (!plan || plan.undo_count < 1) return
+                  try {
+                    setPlan(await api.undo())
+                    setToast('Изменение отменено')
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : 'Ошибка')
+                  }
+                }}
+              >
+                ← Отменить ({plan?.undo_count ?? 0})
+              </button>
+              <button
+                type="button"
+                className={`header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm ${
+                  !plan || (plan.redo_count ?? 0) < 1 ? 'is-disabled' : ''
+                }`}
+                aria-disabled={!plan || (plan.redo_count ?? 0) < 1}
+                onClick={async () => {
+                  if (!plan || (plan.redo_count ?? 0) < 1) return
+                  try {
+                    setPlan(await api.redo())
+                    setToast('Изменение повторено')
+                  } catch (e) {
+                    setError(e instanceof Error ? e.message : 'Ошибка')
+                  }
+                }}
+              >
+                Повторить → ({plan?.redo_count ?? 0})
+              </button>
+              <button
+                type="button"
+                className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+                onClick={() => setAssigneesOpen(true)}
+              >
+                Исполнители
+              </button>
+              <button
+                type="button"
+                className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+                onClick={() => fileRef.current?.click()}
+              >
+                Импорт Excel
+              </button>
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".xlsx"
+                className="hidden"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0]
+                  e.target.value = ''
+                  if (!file) return
+                  try {
+                    setPlan(await api.importExcel(file))
+                    setToast('План импортирован')
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Импорт не удался')
+                  }
+                }}
+              />
+            </>
+          )}
           <button
             type="button"
             className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
@@ -283,13 +307,15 @@ export default function App() {
           >
             Экспорт Excel
           </button>
-          <button
-            type="button"
-            className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
-            onClick={() => setResetConfirmOpen(true)}
-          >
-            Сбросить демо
-          </button>
+          {canEdit && (
+            <button
+              type="button"
+              className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
+              onClick={() => setResetConfirmOpen(true)}
+            >
+              Сбросить демо
+            </button>
+          )}
           <button
             type="button"
             className="header-action rounded-lg bg-[var(--surface-2)] px-3 py-1.5 text-sm"
@@ -337,8 +363,43 @@ export default function App() {
               highlightCodes={highlight}
               onSelect={setSelected}
               onShiftTasks={async (taskIds, days) => {
-                if (!days || taskIds.length === 0) return
+                if (!canEdit || !days || taskIds.length === 0) return
                 setPlan(await api.shiftTasks(taskIds, days))
+              }}
+              onRequestCreate={(ctx) => {
+                if (!canEdit) return
+                setError('')
+                setCreateCtx({
+                  ...ctx,
+                  default_start: plan.start_date,
+                })
+              }}
+              onDeleteTask={async (task) => {
+                if (!canEdit) return
+                setError('')
+                if (task.has_children) {
+                  setError(
+                    `Нельзя удалить ${task.code}: есть дочерние задачи. Сначала удалите их.`,
+                  )
+                  return
+                }
+                if (!window.confirm(`Удалить задачу «${task.code} ${task.title}»?`)) return
+                try {
+                  setPlan(await api.deleteTask(task.id))
+                  if (selected?.id === task.id) setSelected(null)
+                  setToast(`Удалено: ${task.code}`)
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : 'Ошибка удаления')
+                }
+              }}
+              onReorderTasks={async (body) => {
+                if (!canEdit) return
+                setError('')
+                try {
+                  setPlan(await api.reorderTasks(body))
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : 'Ошибка порядка')
+                }
               }}
             />
           ) : (
@@ -348,7 +409,7 @@ export default function App() {
           )}
         </div>
 
-        {chatOpen && (
+        {canEdit && chatOpen && (
           <>
             <div
               role="separator"
@@ -393,7 +454,7 @@ export default function App() {
         )}
       </main>
 
-      {!chatOpen && (
+      {canEdit && !chatOpen && (
         <button
           type="button"
           aria-label="Открыть чат с ассистентом"
@@ -412,12 +473,55 @@ export default function App() {
       {selected && (
         <TaskModal
           task={selected}
+          assigneeOptions={assigneeOptions}
+          readOnly={!canEdit}
           onClose={() => setSelected(null)}
           onSave={async (id, body) => {
             setPlan(await api.updateTask(id, body))
+            setAssignees(await api.assignees())
           }}
         />
       )}
+      {canEdit && createCtx && (
+        <CreateTaskModal
+          context={createCtx}
+          assigneeOptions={assigneeOptions}
+          onClose={() => setCreateCtx(null)}
+          onCreate={async (body) => {
+            setError('')
+            try {
+              const next = await api.createTask(body)
+              setPlan(next)
+              setAssignees(await api.assignees())
+              const created = [...next.tasks].reverse().find((t) => t.title === body.title)
+              if (created) {
+                setSelected(created)
+                setHighlight([created.code])
+              }
+              setToast('Задача создана')
+            } catch (e) {
+              setError(e instanceof Error ? e.message : 'Ошибка создания')
+              throw e
+            }
+          }}
+        />
+      )}
+      <AssigneesModal
+        open={assigneesOpen && canEdit}
+        assignees={assignees}
+        onClose={() => setAssigneesOpen(false)}
+        onCreate={async (name) => {
+          await api.createAssignee(name)
+          setAssignees(await api.assignees())
+          setToast(`Добавлен: ${name}`)
+        }}
+        onDelete={async (id) => {
+          await api.deleteAssignee(id)
+          setAssignees(await api.assignees())
+          setPlan(await api.plan())
+          setToast('Исполнитель удалён')
+        }}
+      />
       <AgentJournal open={journalOpen} onClose={() => setJournalOpen(false)} />
 
       {resetConfirmOpen && (

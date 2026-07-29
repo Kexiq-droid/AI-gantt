@@ -1,17 +1,33 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { buildCalendarSpans } from '../lib/calendarRu'
 import type { Plan, Task } from '../types'
+import type { CreateTaskContext } from './CreateTaskModal'
 
 type Props = {
   plan: Plan
   highlightCodes: string[]
   onSelect: (task: Task) => void
   onShiftTasks: (taskIds: number[], days: number) => void
+  onRequestCreate: (ctx: CreateTaskContext) => void
+  onDeleteTask: (task: Task) => void
+  onReorderTasks: (body: {
+    task_id: number
+    before_task_id?: number | null
+    after_task_id?: number | null
+  }) => void | Promise<void>
 }
 
 type Zoom = 'day' | 'week'
 
+type CtxMenu =
+  | { kind: 'add'; x: number; y: number; ctx: CreateTaskContext }
+  | { kind: 'task'; x: number; y: number; task: Task }
+
 const HEADER_H = 72 // year 22 + month 22 + day 28
+/** Extra days before earliest task so the timeline can scroll into the past. */
+const PAST_PAD_DAYS = 60
+/** Keep this many past days visible left of «today» / plan start on first view. */
+const INITIAL_PAST_VISIBLE = 14
 
 function parseDate(s: string) {
   const [y, m, d] = s.split('-').map(Number)
@@ -28,10 +44,47 @@ function addDays(d: Date, n: number) {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n)
 }
 
-export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Props) {
+function insertContextAfter(
+  flat: { task: Task }[],
+  index: number,
+): CreateTaskContext {
+  const after = flat[index]?.task
+  const before = flat[index + 1]?.task
+  if (!after) {
+    return { parent_id: null, after_task_id: null, hint: 'Корневая задача' }
+  }
+  if (before && before.parent_id === after.id) {
+    return {
+      parent_id: after.id,
+      after_task_id: null,
+      hint: `Внутри «${after.code}»`,
+    }
+  }
+  return {
+    parent_id: after.parent_id,
+    after_task_id: after.id,
+    hint: `После «${after.code}»`,
+  }
+}
+
+export function GanttChart({
+  plan,
+  highlightCodes,
+  onSelect,
+  onShiftTasks,
+  onRequestCreate,
+  onDeleteTask,
+  onReorderTasks,
+}: Props) {
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [zoom, setZoom] = useState<Zoom>('day')
   const [selectedIds, setSelectedIds] = useState<number[]>([])
+  const [menu, setMenu] = useState<CtxMenu | null>(null)
+  const [listDragId, setListDragId] = useState<number | null>(null)
+  const [dropIndicator, setDropIndicator] = useState<{
+    taskId: number
+    place: 'before' | 'after'
+  } | null>(null)
   const selectedRef = useRef<number[]>([])
   selectedRef.current = selectedIds
 
@@ -79,6 +132,7 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
       if (s < min) min = s
       if (e > max) max = e
     }
+    min = addDays(min, -PAST_PAD_DAYS)
     max = addDays(max, 7)
     return { min, max, total: Math.max(daysBetween(min, max), 14) }
   }, [plan])
@@ -98,6 +152,23 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
     if (off < 0 || off >= range.total) return null
     return off
   }, [range.min, range.total])
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const didInitScroll = useRef(false)
+
+  useEffect(() => {
+    didInitScroll.current = false
+  }, [plan.start_date, plan.title])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || didInitScroll.current) return
+    const anchor =
+      todayOffset ?? daysBetween(range.min, parseDate(plan.start_date))
+    const left = Math.max(0, (anchor - INITIAL_PAST_VISIBLE) * pxPerDay)
+    el.scrollLeft = left
+    didInitScroll.current = true
+  }, [todayOffset, range.min, pxPerDay, plan.start_date])
 
   const hasChildren = (id: number) => (childrenMap.get(id) || []).length > 0
 
@@ -210,6 +281,19 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
   const holidayBg = 'color-mix(in srgb, var(--danger) 22%, transparent)'
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds])
 
+  useEffect(() => {
+    if (!menu) return
+    const close = () => setMenu(null)
+    window.addEventListener('click', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [menu])
+
+  const dragTask = listDragId != null ? tasksById.get(listDragId) : null
+
   return (
     <div
       ref={rootRef}
@@ -245,6 +329,19 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
           <div className="flex gap-2">
             <button
               type="button"
+              className="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white"
+              onClick={() =>
+                onRequestCreate({
+                  parent_id: null,
+                  after_task_id: null,
+                  hint: 'Корневая задача',
+                })
+              }
+            >
+              + Задача
+            </button>
+            <button
+              type="button"
               className={`rounded-lg px-3 py-1.5 text-sm ${zoom === 'day' ? 'bg-[var(--accent)] text-white' : 'bg-[var(--surface-2)]'}`}
               onClick={() => setZoom('day')}
             >
@@ -261,40 +358,137 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto">
         <div className="flex min-w-max">
           <div className="sticky left-0 z-20 w-[280px] shrink-0 border-r border-[var(--border)] bg-[var(--surface)]">
             <div
               className="flex items-end border-b border-[var(--border)] px-3 pb-2 text-xs text-[var(--muted)]"
               style={{ height: HEADER_H }}
+              onContextMenu={(e) => {
+                e.preventDefault()
+                setMenu({
+                  kind: 'add',
+                  x: e.clientX,
+                  y: e.clientY,
+                  ctx: {
+                    parent_id: null,
+                    after_task_id: null,
+                    hint: 'Корневая задача',
+                  },
+                })
+              }}
+              title="ПКМ — добавить задачу"
             >
               Задача
             </div>
-            {flat.map(({ task, depth }) => (
-              <div
-                key={task.id}
-                className="flex h-10 items-center gap-1 border-b border-[var(--border)] px-2 text-sm"
-              >
-                <button
-                  type="button"
-                  className="w-5 text-[var(--muted)]"
-                  onClick={() =>
-                    hasChildren(task.id) &&
-                    setCollapsed((c) => ({ ...c, [task.code]: !c[task.code] }))
-                  }
+            {flat.map(({ task, depth }, index) => (
+              <div key={task.id} className="relative">
+                {index > 0 && (
+                  <div
+                    className="absolute inset-x-0 z-10 h-2 -translate-y-1/2 cursor-context-menu"
+                    style={{ top: 0 }}
+                    onContextMenu={(e) => {
+                      e.preventDefault()
+                      e.stopPropagation()
+                      setMenu({
+                        kind: 'add',
+                        x: e.clientX,
+                        y: e.clientY,
+                        ctx: insertContextAfter(flat, index - 1),
+                      })
+                    }}
+                  />
+                )}
+                {dropIndicator?.taskId === task.id && dropIndicator.place === 'before' && (
+                  <div className="absolute inset-x-1 top-0 z-20 h-0.5 bg-[var(--accent)]" />
+                )}
+                <div
+                  className={`flex h-10 items-center gap-1 border-b border-[var(--border)] px-2 text-sm ${
+                    listDragId === task.id ? 'opacity-50' : ''
+                  }`}
+                  draggable
+                  onDragStart={(e) => {
+                    setListDragId(task.id)
+                    e.dataTransfer.effectAllowed = 'move'
+                    e.dataTransfer.setData('text/plain', String(task.id))
+                  }}
+                  onDragEnd={() => {
+                    setListDragId(null)
+                    setDropIndicator(null)
+                  }}
+                  onDragOver={(e) => {
+                    if (!dragTask || dragTask.id === task.id) return
+                    if (dragTask.parent_id !== task.parent_id) return
+                    e.preventDefault()
+                    const rect = e.currentTarget.getBoundingClientRect()
+                    const place =
+                      e.clientY < rect.top + rect.height / 2 ? 'before' : 'after'
+                    setDropIndicator({ taskId: task.id, place })
+                  }}
+                  onDrop={(e) => {
+                    e.preventDefault()
+                    if (!dragTask || dragTask.id === task.id) return
+                    if (dragTask.parent_id !== task.parent_id) return
+                    const place =
+                      dropIndicator?.taskId === task.id
+                        ? dropIndicator.place
+                        : 'after'
+                    void onReorderTasks(
+                      place === 'before'
+                        ? { task_id: dragTask.id, before_task_id: task.id }
+                        : { task_id: dragTask.id, after_task_id: task.id },
+                    )
+                    setListDragId(null)
+                    setDropIndicator(null)
+                  }}
+                  onContextMenu={(e) => {
+                    e.preventDefault()
+                    setMenu({
+                      kind: 'task',
+                      x: e.clientX,
+                      y: e.clientY,
+                      task,
+                    })
+                  }}
                 >
-                  {hasChildren(task.id) ? (collapsed[task.code] ? '▸' : '▾') : ''}
-                </button>
-                <button
-                  type="button"
-                  className="truncate text-left hover:text-[var(--accent)]"
-                  style={{ paddingLeft: depth * 12 }}
-                  onClick={() => onSelect(task)}
-                  title={task.code}
-                >
-                  <span className="mr-1 text-xs text-[var(--muted)]">{task.code}</span>
-                  {task.title}
-                </button>
+                  <button
+                    type="button"
+                    className="w-5 text-[var(--muted)]"
+                    onClick={() =>
+                      hasChildren(task.id) &&
+                      setCollapsed((c) => ({ ...c, [task.code]: !c[task.code] }))
+                    }
+                  >
+                    {hasChildren(task.id) ? (collapsed[task.code] ? '▸' : '▾') : ''}
+                  </button>
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left hover:text-[var(--accent)]"
+                    style={{ paddingLeft: depth * 12 }}
+                    onClick={() => onSelect(task)}
+                    title={`${task.code} · перетащите для порядка · ПКМ — меню`}
+                  >
+                    <span className="mr-1 text-xs text-[var(--muted)]">{task.code}</span>
+                    {task.title}
+                  </button>
+                </div>
+                {dropIndicator?.taskId === task.id && dropIndicator.place === 'after' && (
+                  <div className="absolute inset-x-1 bottom-0 z-20 h-0.5 bg-[var(--accent)]" />
+                )}
+                {index === flat.length - 1 && (
+                  <div
+                    className="h-2 cursor-context-menu"
+                    onContextMenu={(e) => {
+                      e.preventDefault()
+                      setMenu({
+                        kind: 'add',
+                        x: e.clientX,
+                        y: e.clientY,
+                        ctx: insertContextAfter(flat, index),
+                      })
+                    }}
+                  />
+                )}
               </div>
             ))}
           </div>
@@ -371,19 +565,13 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
                       }}
                       title={`${day.weekday}, ${day.label}${isToday ? ' · Сегодня' : ''}${day.holiday ? ' · Праздник' : day.weekend ? ' · Выходной' : ''}`}
                     >
-                      {isToday ? (
-                        <span className="px-0.5 text-center text-[8px] font-bold uppercase leading-tight tracking-wide">
-                          Сегодня
-                        </span>
-                      ) : (
-                        showLabel && (
-                          <>
-                            <span className="text-[9px] font-semibold">{day.weekday}</span>
-                            <span className="mt-0.5 text-[10px] tabular-nums tracking-tight">
-                              {String(day.date.getDate()).padStart(2, '0')}
-                            </span>
-                          </>
-                        )
+                      {showLabel && (
+                        <>
+                          <span className="text-[9px] font-semibold">{day.weekday}</span>
+                          <span className="mt-0.5 text-[10px] tabular-nums tracking-tight">
+                            {String(day.date.getDate()).padStart(2, '0')}
+                          </span>
+                        </>
                       )}
                     </div>
                   )
@@ -549,6 +737,71 @@ export function GanttChart({ plan, highlightCodes, onSelect, onShiftTasks }: Pro
           </div>
         </div>
       </div>
+
+      {menu && (
+        <div
+          className="fixed z-[60] min-w-[180px] rounded-lg border border-[var(--border)] bg-[var(--surface)] py-1 shadow-lg"
+          style={{ left: menu.x, top: menu.y }}
+          onClick={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+        >
+          {menu.kind === 'add' ? (
+            <button
+              type="button"
+              className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--surface-2)]"
+              onClick={() => {
+                onRequestCreate(menu.ctx)
+                setMenu(null)
+              }}
+            >
+              Добавить задачу…
+            </button>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--surface-2)]"
+                onClick={() => {
+                  onRequestCreate({
+                    parent_id: menu.task.parent_id,
+                    after_task_id: menu.task.id,
+                    hint: `После «${menu.task.code}»`,
+                  })
+                  setMenu(null)
+                }}
+              >
+                Добавить после…
+              </button>
+              {hasChildren(menu.task.id) && (
+                <button
+                  type="button"
+                  className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--surface-2)]"
+                  onClick={() => {
+                    onRequestCreate({
+                      parent_id: menu.task.id,
+                      after_task_id: null,
+                      hint: `Внутри «${menu.task.code}»`,
+                    })
+                    setMenu(null)
+                  }}
+                >
+                  Добавить дочернюю…
+                </button>
+              )}
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm text-[var(--danger)] hover:bg-[var(--surface-2)]"
+                onClick={() => {
+                  onDeleteTask(menu.task)
+                  setMenu(null)
+                }}
+              >
+                Удалить
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }

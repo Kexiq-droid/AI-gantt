@@ -23,6 +23,8 @@ class User(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     login: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
+    # editor — полный доступ; viewer — только чтение (план, экспорт, журнал)
+    role: Mapped[str] = mapped_column(String(16), default="editor")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     plans: Mapped[list["Plan"]] = relationship(back_populates="user")
@@ -44,6 +46,9 @@ class Plan(Base):
         back_populates="plan", cascade="all, delete-orphan"
     )
     dependencies: Mapped[list["Dependency"]] = relationship(
+        back_populates="plan", cascade="all, delete-orphan"
+    )
+    assignees: Mapped[list["Assignee"]] = relationship(
         back_populates="plan", cascade="all, delete-orphan"
     )
 
@@ -81,6 +86,20 @@ class Dependency(Base):
     successor_task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
 
     plan: Mapped["Plan"] = relationship(back_populates="dependencies")
+
+
+class Assignee(Base):
+    """Catalog of assignee names for a plan (suggestions + management UI)."""
+
+    __tablename__ = "assignees"
+    __table_args__ = (UniqueConstraint("plan_id", "name", name="uq_plan_assignee"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    plan_id: Mapped[int] = mapped_column(ForeignKey("plans.id"), index=True)
+    name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    plan: Mapped["Plan"] = relationship(back_populates="assignees")
 
 
 class ChatMessage(Base):

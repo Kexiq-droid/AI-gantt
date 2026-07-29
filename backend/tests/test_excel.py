@@ -160,3 +160,56 @@ def test_export_filename_sanitizes():
     assert name.endswith("_2026-07-28.xlsx")
     assert "/" not in name
     assert '"' not in name
+
+
+def test_import_tz_five_columns_only():
+    """Assignment Excel: задача, описание, исполнитель, длительность, предшественники."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["задача", "описание", "исполнитель", "длительность", "предшественники"])
+    ws.append(["Анализ рынка", "обзор", "Петрова", 5, ""])
+    ws.append(["Синтез", "лаб", "Иванов", 3, "Анализ рынка"])
+    buf = BytesIO()
+    wb.save(buf)
+    imported = import_plan_xlsx(buf.getvalue(), plan_start=date(2026, 3, 2))
+    assert not validate_plan_dict(imported)
+    assert [t["code"] for t in imported["tasks"]] == ["T1", "T2"]
+    assert imported["tasks"][0]["assignee"] == "Петрова"
+    assert imported["tasks"][1]["predecessors"] == ["T1"]
+    assert imported["tasks"][1]["start_date"] > imported["tasks"][0]["start_date"]
+
+
+def test_import_without_parent_and_pred_columns():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["код", "задача", "описание", "исполнитель", "длительность"])
+    ws.append(["T1", "Alone", "d", "Иванов", 4])
+    buf = BytesIO()
+    wb.save(buf)
+    imported = import_plan_xlsx(buf.getvalue(), plan_start=date(2026, 3, 2))
+    assert not validate_plan_dict(imported)
+    assert imported["tasks"][0]["code"] == "T1"
+    assert imported["tasks"][0]["predecessors"] == []
+    assert imported["tasks"][0]["parent"] is None
+
+
+def test_import_examples_sample_file():
+    from pathlib import Path
+
+    raw = (Path(__file__).resolve().parents[2] / "examples" / "plan_biokad_demo.xlsx").read_bytes()
+    imported = import_plan_xlsx(raw)
+    assert not validate_plan_dict(imported)
+    assert len(imported["tasks"]) >= 10
+
+
+def test_import_pred_by_row_index():
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["задача", "описание", "исполнитель", "длительность", "предшественники"])
+    ws.append(["A", "", "", 2, ""])
+    ws.append(["B", "", "", 2, "1"])
+    buf = BytesIO()
+    wb.save(buf)
+    imported = import_plan_xlsx(buf.getvalue(), plan_start=date(2026, 1, 1))
+    assert imported["tasks"][1]["predecessors"] == ["T1"]
+    assert not validate_plan_dict(imported)

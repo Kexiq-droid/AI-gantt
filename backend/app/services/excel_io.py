@@ -273,12 +273,15 @@ def export_plan_xlsx(plan: dict[str, Any]) -> bytes:
 
 def _find_header_row(rows: list[tuple[Any, ...]]) -> tuple[int, list[str]]:
     """Locate the table header among brand/meta rows. Returns (index, lowered headers)."""
+    title_names = HEADER_ALIASES["задача"]
     for idx, row in enumerate(rows[:30]):
         cells = [str(c or "").strip().lower() for c in row]
-        if "код" in cells or "code" in cells:
-            if any(h in cells for h in ("задача", "title", "название")):
-                return idx, cells
-    raise ValueError("Не найдена строка заголовков (ожидаются колонки «код», «задача», …)")
+        if any(h in cells for h in title_names):
+            return idx, cells
+    raise ValueError(
+        "Не найдена строка заголовков (ожидается колонка «задача»; "
+        "опционально: код, описание, исполнитель, длительность, предшественники, …)"
+    )
 
 
 def _col_index(header: list[str], *names: str) -> int:
@@ -295,6 +298,39 @@ def _optional_col(header: list[str], *names: str) -> int | None:
     return None
 
 
+def _next_auto_code(used: set[str]) -> str:
+    n = 1
+    while f"T{n}" in used:
+        n += 1
+    return f"T{n}"
+
+
+def _resolve_pred_refs(
+    raw_refs: list[str],
+    *,
+    by_code: dict[str, str],
+    by_title: dict[str, str],
+    by_index: dict[int, str],
+) -> list[str]:
+    """Map predecessor tokens to task codes (by code, title, or 1-based row index)."""
+    out: list[str] = []
+    for ref in raw_refs:
+        if ref in by_code:
+            out.append(ref)
+            continue
+        title_key = ref.casefold()
+        if title_key in by_title:
+            out.append(by_title[title_key])
+            continue
+        if ref.isdigit():
+            code = by_index.get(int(ref))
+            if code:
+                out.append(code)
+                continue
+        out.append(ref)  # keep as-is; validate_plan will report unknown codes
+    return out
+
+
 def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str, Any]:
     wb = load_workbook(BytesIO(content), data_only=True)
     ws = wb.active
@@ -304,16 +340,16 @@ def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str
 
     header_idx, header = _find_header_row(rows)
 
-    i_code = _col_index(header, *HEADER_ALIASES["код"])
+    i_code = _optional_col(header, *HEADER_ALIASES["код"])
     i_title = _col_index(header, *HEADER_ALIASES["задача"])
-    i_desc = _col_index(header, *HEADER_ALIASES["описание"])
-    i_assignee = _col_index(header, *HEADER_ALIASES["исполнитель"])
+    i_desc = _optional_col(header, *HEADER_ALIASES["описание"])
+    i_assignee = _optional_col(header, *HEADER_ALIASES["исполнитель"])
     i_dur = _optional_col(header, *HEADER_ALIASES["длительность"])
     i_progress = _optional_col(header, *HEADER_ALIASES["% выполнения"])
     i_start = _optional_col(header, *HEADER_ALIASES["дата начала"])
     i_end = _optional_col(header, *HEADER_ALIASES["дата конца"])
-    i_pred = _col_index(header, *HEADER_ALIASES["предшественники"])
-    i_parent = _col_index(header, *HEADER_ALIASES["родитель"])
+    i_pred = _optional_col(header, *HEADER_ALIASES["предшественники"])
+    i_parent = _optional_col(header, *HEADER_ALIASES["родитель"])
 
     # Prefer title from brand header if present
     plan_title = "Импортированный план"
@@ -329,21 +365,33 @@ def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str
             return None
         return row[index] if index < len(row) else None
 
+    used_codes: set[str] = set()
     tasks: list[dict[str, Any]] = []
     for idx, row in enumerate(rows[header_idx + 1 :], start=header_idx + 2):
         if not row or all(c is None or str(c).strip() == "" for c in row):
             continue
-        code = str(cell(row, i_code) or "").strip()
+
+        title_raw = str(cell(row, i_title) or "").strip()
+        code = str(cell(row, i_code) or "").strip() if i_code is not None else ""
+
+        # Skip footer hints / non-data rows (garbage in code column)
+        if code and " " in code and not re.match(r"^[PT]\d", code, re.I):
+            continue
+        # Need at least a title or an explicit code
+        if not title_raw and not code:
+            continue
+
         if not code:
-            continue
-        # Skip footer hints / non-data rows
-        if " " in code and not re.match(r"^[PT]\d", code, re.I):
-            continue
+            code = _next_auto_code(used_codes)
+        if code in used_codes:
+            raise ValueError(f"Дублирующийся код задачи: {code}")
+        used_codes.add(code)
 
         preds_raw = str(cell(row, i_pred) or "").strip()
         preds = [p.strip() for p in preds_raw.replace(";", ",").split(",") if p.strip()]
         parent = str(cell(row, i_parent) or "").strip() or None
-        title_raw = str(cell(row, i_title) or code)
+        if not title_raw:
+            title_raw = code
 
         start = _parse_excel_date(cell(row, i_start))
         end = _parse_excel_date(cell(row, i_end))
@@ -395,6 +443,29 @@ def import_plan_xlsx(content: bytes, plan_start: date | None = None) -> dict[str
 
     if not tasks:
         raise ValueError("В файле нет задач для импорта")
+
+    # Resolve predecessors by code / title / 1-based row index among imported tasks
+    by_code = {t["code"]: t["code"] for t in tasks}
+    by_title: dict[str, str] = {}
+    for t in tasks:
+        key = str(t["title"]).casefold()
+        by_title.setdefault(key, t["code"])
+    by_index = {i + 1: t["code"] for i, t in enumerate(tasks)}
+    for t in tasks:
+        t["predecessors"] = _resolve_pred_refs(
+            t["predecessors"],
+            by_code=by_code,
+            by_title=by_title,
+            by_index=by_index,
+        )
+        if t["parent"]:
+            parent_ref = t["parent"]
+            if parent_ref not in by_code:
+                resolved = by_title.get(parent_ref.casefold()) or (
+                    by_index.get(int(parent_ref)) if parent_ref.isdigit() else None
+                )
+                if resolved:
+                    t["parent"] = resolved
 
     fallback_start = plan_start or date.today()
     explicit_starts = [t["_explicit_start"] for t in tasks if t.get("_explicit_start")]

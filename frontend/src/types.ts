@@ -32,7 +32,9 @@ export type Plan = {
   redo_count: number
 }
 
-export type User = { id: number; login: string }
+export type User = { id: number; login: string; role: 'editor' | 'viewer' | string }
+
+export type Assignee = { id: number; name: string }
 
 export type ChatMessage = {
   id: number

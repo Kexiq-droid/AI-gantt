@@ -250,6 +250,9 @@ def load_seed_into_plan(db: Session, plan: Plan) -> None:
     plan.title = PLAN_TITLE
     plan.start_date = PLAN_START
     _replace_plan_content(db, plan, payload, changed_by="user")
+    from backend.app.services.assignees import sync_assignees_from_tasks
+
+    sync_assignees_from_tasks(db, plan)
 
 
 def ensure_user_plan(db: Session, user_id: int) -> Plan:
@@ -285,6 +288,9 @@ def apply_imported_xlsx(
     push_snapshot(db, plan, source=source)
     _replace_plan_content(db, plan, payload, changed_by=changed_by)
     db.flush()
+    from backend.app.services.assignees import sync_assignees_from_tasks
+
+    sync_assignees_from_tasks(db, plan)
     codes = [str(t.get("code")) for t in (payload.get("tasks") or []) if t.get("code")]
     title = str(payload.get("title") or plan.title or "")
     return True, [], codes, title

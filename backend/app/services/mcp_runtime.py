@@ -177,6 +177,9 @@ def execute_tool(
         push_snapshot(db, plan, source="agent")
         _replace_plan_content(db, plan, new_plan, changed_by="agent")
         db.flush()
+        from backend.app.services.assignees import sync_assignees_from_tasks
+
+        sync_assignees_from_tasks(db, plan)
         ctx["applied"] = True
         return {"ok": True, "dry_run": False, "errors": [], "changes": changes}, changes
 

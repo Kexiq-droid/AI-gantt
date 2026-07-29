@@ -12,6 +12,7 @@ class LoginRequest(BaseModel):
 class UserOut(BaseModel):
     id: int
     login: str
+    role: str = "editor"
 
     model_config = {"from_attributes": True}
 
@@ -65,9 +66,37 @@ class TaskUpdate(BaseModel):
     progress_pct: int | None = None
 
 
+class TaskCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    code: str | None = None
+    parent_id: int | None = None
+    after_task_id: int | None = None
+    description: str = ""
+    assignee: str = ""
+    duration_days: int = Field(default=5, ge=1, le=3650)
+    start_date: date | None = None
+
+
+class TasksReorderRequest(BaseModel):
+    task_id: int
+    before_task_id: int | None = None
+    after_task_id: int | None = None
+
+
 class TasksShiftRequest(BaseModel):
     task_ids: list[int] = Field(default_factory=list)
     days: int
+
+
+class AssigneeOut(BaseModel):
+    id: int
+    name: str
+
+    model_config = {"from_attributes": True}
+
+
+class AssigneeCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
 
 
 class ChatRequest(BaseModel):

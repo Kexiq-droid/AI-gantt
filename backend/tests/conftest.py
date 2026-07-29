@@ -63,11 +63,11 @@ def db(SessionLocal) -> Generator[Session, None, None]:
 def seeded_db(db: Session) -> Session:
     """Users pm/viewer + full seed plan for each."""
     settings = get_settings()
-    for login, password in (
-        ("pm", settings.demo_pm_password),
-        ("viewer", settings.demo_viewer_password),
+    for login, password, role in (
+        ("pm", settings.demo_pm_password, "editor"),
+        ("viewer", settings.demo_viewer_password, "viewer"),
     ):
-        user = User(login=login, password_hash=hash_password(password))
+        user = User(login=login, password_hash=hash_password(password), role=role)
         db.add(user)
         db.flush()
         plan = Plan(user_id=user.id, title="tmp", start_date=__import__("datetime").date.today())
@@ -85,7 +85,7 @@ def mini_plan(db: Session) -> tuple[User, Plan]:
 
     from backend.app.models import Task
 
-    user = User(login="tooluser", password_hash=hash_password("secret"))
+    user = User(login="tooluser", password_hash=hash_password("secret"), role="editor")
     db.add(user)
     db.flush()
     plan = Plan(user_id=user.id, title="Mini", start_date=date(2026, 7, 1))
@@ -174,6 +174,17 @@ def login_pm(client: TestClient) -> TestClient:
     r = client.post(
         "/api/auth/login",
         json={"login": "pm", "password": settings.demo_pm_password},
+    )
+    assert r.status_code == 200, r.text
+    return client
+
+
+@pytest.fixture()
+def login_viewer(client: TestClient) -> TestClient:
+    settings = get_settings()
+    r = client.post(
+        "/api/auth/login",
+        json={"login": "viewer", "password": settings.demo_viewer_password},
     )
     assert r.status_code == 200, r.text
     return client

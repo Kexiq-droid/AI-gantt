@@ -87,5 +87,24 @@ def init_db() -> None:
                     conn.execute(
                         text("UPDATE tasks SET progress_pct = 0 WHERE progress_pct IS NULL")
                     )
+        if "users" in insp.get_table_names():
+            cols = {c["name"] for c in insp.get_columns("users")}
+            if "role" not in cols:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE users ADD COLUMN role VARCHAR(16) "
+                            "DEFAULT 'editor'"
+                        )
+                    )
+                    conn.execute(
+                        text("UPDATE users SET role = 'editor' WHERE role IS NULL")
+                    )
+                    conn.execute(
+                        text("UPDATE users SET role = 'viewer' WHERE login = 'viewer'")
+                    )
+                    conn.execute(
+                        text("UPDATE users SET role = 'editor' WHERE login = 'pm'")
+                    )
     except Exception:
         pass
