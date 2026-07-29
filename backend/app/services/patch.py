@@ -10,6 +10,8 @@ from backend.app.services.validate import validate_plan_dict
 def _matches_filter(task: dict[str, Any], filt: dict[str, Any] | None, by_code: dict) -> bool:
     if not filt:
         return True
+    if filt.get("all") is True:
+        return True
     # LLM often sends {"code":"T2.1"} instead of {"codes":["T2.1"]}
     if "code" in filt and "codes" not in filt:
         return task["code"] == str(filt["code"])
@@ -202,7 +204,16 @@ def apply_plan_patch_dict(
                 by_code[code]["last_changed_by"] = changed_by
                 changes.add(code)
             elif kind == "delete":
-                code = op["code"]
+                filt = op.get("filter") or {}
+                if filt.get("all") is True or op.get("all") is True:
+                    removed = [t["code"] for t in tasks]
+                    tasks.clear()
+                    by_code.clear()
+                    changes.update(removed)
+                    continue
+                code = op.get("code")
+                if not code:
+                    raise ValueError("delete: укажите code или filter.all=true")
                 if code not in by_code:
                     raise ValueError(f"Задача {code} не найдена")
                 # remove task and deps pointing to it; also children? require explicit
@@ -214,6 +225,12 @@ def apply_plan_patch_dict(
                     t["predecessors"] = [p for p in (t.get("predecessors") or []) if p != code]
                 by_code = {t["code"]: t for t in tasks}
                 changes.add(code)
+            elif kind == "clear":
+                # alias: clear whole plan
+                removed = [t["code"] for t in tasks]
+                tasks.clear()
+                by_code.clear()
+                changes.update(removed)
             else:
                 raise ValueError(f"Неизвестная операция: {kind}")
     except Exception as exc:  # noqa: BLE001
@@ -230,6 +247,7 @@ def apply_plan_patch_dict(
             "reassign",
             "update",
             "delete",
+            "clear",
             "set_deps",
             "set_dependencies",
             "create",
@@ -242,6 +260,7 @@ def apply_plan_patch_dict(
     if mutating and not changes:
         return plan, [], [
             "Патч не изменил ни одной задачи. Для одной задачи используй "
-            'filter.code / filter.codes, для фазы — filter.phase_code.'
+            'filter.all=true — весь план; filter.code / filter.codes; '
+            'для фазы — filter.phase_code.'
         ]
     return working, sorted(changes), []

@@ -37,8 +37,29 @@ from backend.app.services.plan_store import (
     redo_snapshot,
 )
 from backend.app.services.serializers import serialize_plan
+from backend.app.services.ui_actions import log_ui_action
 
 router = APIRouter(prefix="/api/plans", tags=["plans"])
+
+
+def _pred_codes(db: Session, plan_id: int, task_id: int) -> list[str]:
+    deps = db.query(Dependency).filter(
+        Dependency.plan_id == plan_id,
+        Dependency.successor_task_id == task_id,
+    ).all()
+    by_id = {t.id: t for t in db.query(Task).filter(Task.plan_id == plan_id).all()}
+    out: list[str] = []
+    for d in deps:
+        pred = by_id.get(d.predecessor_task_id)
+        if pred:
+            out.append(pred.code)
+    return out
+
+
+def _parent_code(task: Task, by_id: dict[int, Task]) -> str | None:
+    if task.parent_id and task.parent_id in by_id:
+        return by_id[task.parent_id].code
+    return None
 
 
 def _siblings(plan_tasks: list[Task], parent_id: int | None) -> list[Task]:
@@ -139,6 +160,22 @@ def create_task(
     ensure_assignee(db, plan.id, new_task.assignee)
     sibs.insert(insert_at, new_task)
     _renumber(sibs)
+    parent_code = parent.code if parent else None
+    log_ui_action(
+        db,
+        plan,
+        kind="create",
+        summary=f"create {code} «{new_task.title}»"
+        + (f" under {parent_code}" if parent_code else ""),
+        changes=[code],
+        forward={
+            "code": code,
+            "parent": parent_code,
+            "after_task_id": body.after_task_id,
+            "title": new_task.title,
+        },
+        inverse_ops=[{"op": "delete", "code": code}],
+    )
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -170,8 +207,9 @@ def reorder_tasks(
         return serialize_plan(db, plan)
 
     push_snapshot(db, plan, source="ui")
-    sibs = _siblings(list(plan.tasks), task.parent_id)
-    sibs = [t for t in sibs if t.id != task.id]
+    sibs_before = _siblings(list(plan.tasks), task.parent_id)
+    order_before = [t.code for t in sibs_before]
+    sibs = [t for t in sibs_before if t.id != task.id]
     if body.before_task_id is not None:
         idx = next(i for i, t in enumerate(sibs) if t.id == body.before_task_id)
         sibs.insert(idx, task)
@@ -179,6 +217,21 @@ def reorder_tasks(
         idx = next(i for i, t in enumerate(sibs) if t.id == body.after_task_id)
         sibs.insert(idx + 1, task)
     _renumber(sibs)
+    order_after = [t.code for t in sibs]
+    # inverse: restore previous sibling sort_order
+    inverse = [
+        {"op": "update", "code": code, "sort_order": (i + 1) * 10}
+        for i, code in enumerate(order_before)
+    ]
+    log_ui_action(
+        db,
+        plan,
+        kind="reorder",
+        summary=f"reorder {task.code} ({' → '.join(order_after)})",
+        changes=[task.code],
+        forward={"code": task.code, "order_before": order_before, "order_after": order_after},
+        inverse_ops=inverse,
+    )
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -202,6 +255,22 @@ def delete_task(
         )
 
     push_snapshot(db, plan, source="ui")
+    by_id = {t.id: t for t in plan.tasks}
+    parent_code = _parent_code(task, by_id)
+    preds = _pred_codes(db, plan.id, task.id)
+    snapshot = {
+        "code": task.code,
+        "parent": parent_code,
+        "title": task.title,
+        "description": task.description or "",
+        "assignee": task.assignee or "",
+        "duration_days": task.duration_days,
+        "progress_pct": task.progress_pct,
+        "start_date": task.start_date.isoformat(),
+        "sort_order": task.sort_order,
+        "predecessors": preds,
+    }
+    code = task.code
     db.query(Dependency).filter(
         Dependency.plan_id == plan.id,
         or_(
@@ -210,6 +279,15 @@ def delete_task(
         ),
     ).delete(synchronize_session=False)
     db.delete(task)
+    log_ui_action(
+        db,
+        plan,
+        kind="delete",
+        summary=f"delete {code}",
+        changes=[code],
+        forward={"code": code},
+        inverse_ops=[{"op": "create", **snapshot}],
+    )
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -237,6 +315,21 @@ def update_task(
             )
         data["progress_pct"] = max(0, min(100, int(data["progress_pct"])))
 
+    # Capture before-state for selective undo
+    field_keys = (
+        "title",
+        "description",
+        "assignee",
+        "duration_days",
+        "start_date",
+        "progress_pct",
+    )
+    before: dict = {}
+    for k in field_keys:
+        if k in data:
+            val = getattr(task, k)
+            before[k] = val.isoformat() if hasattr(val, "isoformat") else val
+
     old_start = task.start_date
     for k, v in data.items():
         setattr(task, k, v)
@@ -244,7 +337,9 @@ def update_task(
     if "assignee" in data:
         ensure_assignee(db, plan.id, task.assignee)
 
+    subtree_codes = [task.code]
     # Сдвиг фазы/родителя — двигаем всё поддерево на тот же delta
+    delta = 0
     if "start_date" in data and task.start_date != old_start:
         delta = (task.start_date - old_start).days
         if delta:
@@ -256,10 +351,31 @@ def update_task(
                 for child in by_parent.get(parent_id) or []:
                     child.start_date = child.start_date + timedelta(days=delta)
                     child.last_changed_by = "user"
+                    subtree_codes.append(child.code)
                     walk(child.id)
 
             walk(task.id)
 
+    inverse_ops: list[dict] = []
+    if before:
+        inv = {"op": "update", "code": task.code, **before}
+        inverse_ops.append(inv)
+    if delta:
+        # restore children that were shifted with parent (parent start restored above)
+        for code in subtree_codes[1:]:
+            inverse_ops.append({"op": "shift", "filter": {"code": code}, "days": -delta})
+
+    changed = list(dict.fromkeys(subtree_codes))
+    summary_bits = [f"{k}→{data[k]}" for k in data if k in field_keys]
+    log_ui_action(
+        db,
+        plan,
+        kind="update",
+        summary=f"update {task.code} ({', '.join(summary_bits) or 'fields'})",
+        changes=changed,
+        forward={"code": task.code, "fields": {k: data[k] for k in data if k in field_keys}},
+        inverse_ops=inverse_ops,
+    )
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -299,6 +415,7 @@ def shift_tasks(
 
     push_snapshot(db, plan, source="ui")
     shifted: set[int] = set()
+    root_codes = [by_id[rid].code for rid in roots if rid in by_id]
 
     def shift_subtree(root_id: int) -> None:
         stack = [root_id]
@@ -318,6 +435,20 @@ def shift_tasks(
     for rid in roots:
         shift_subtree(rid)
 
+    changed_codes = [by_id[tid].code for tid in shifted if tid in by_id]
+    # Inverse: shift every moved task back (patch shift is not subtree-aware)
+    inverse_ops = [
+        {"op": "shift", "filter": {"codes": changed_codes}, "days": -body.days}
+    ] if changed_codes else []
+    log_ui_action(
+        db,
+        plan,
+        kind="shift",
+        summary=f"shift {', '.join(root_codes)} by {body.days}d",
+        changes=changed_codes,
+        forward={"codes": root_codes, "days": body.days},
+        inverse_ops=inverse_ops,
+    )
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -364,6 +495,15 @@ def undo(user: User = Depends(require_editor), db: Session = Depends(get_db)):
     ok = restore_snapshot(db, plan)
     if not ok:
         raise HTTPException(400, "Нечего возвращать")
+    log_ui_action(
+        db,
+        plan,
+        kind="undo_stack",
+        summary="UI undo (snapshot stack)",
+        changes=[],
+        forward={},
+        inverse_ops=[],
+    )
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -375,6 +515,15 @@ def redo(user: User = Depends(require_editor), db: Session = Depends(get_db)):
     ok = redo_snapshot(db, plan)
     if not ok:
         raise HTTPException(400, "Нечего применять вперёд")
+    log_ui_action(
+        db,
+        plan,
+        kind="redo_stack",
+        summary="UI redo (snapshot stack)",
+        changes=[],
+        forward={},
+        inverse_ops=[],
+    )
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)
@@ -395,9 +544,31 @@ def create_assignee(
     db: Session = Depends(get_db),
 ):
     plan = ensure_user_plan(db, user.id)
+    name = (body.name or "").strip()
+    existed = False
+    if name:
+        from backend.app.models import Assignee
+        from sqlalchemy import select
+
+        existed = (
+            db.scalars(
+                select(Assignee).where(Assignee.plan_id == plan.id, Assignee.name == name)
+            ).first()
+            is not None
+        )
     row = ensure_assignee(db, plan.id, body.name)
     if not row:
         raise HTTPException(400, "Пустое имя исполнителя")
+    if not existed:
+        log_ui_action(
+            db,
+            plan,
+            kind="assignee_create",
+            summary=f"assignee create «{row.name}»",
+            changes=[],
+            forward={"name": row.name},
+            inverse_ops=[],
+        )
     db.commit()
     db.refresh(row)
     return row
@@ -410,9 +581,31 @@ def remove_assignee(
     db: Session = Depends(get_db),
 ):
     plan = ensure_user_plan(db, user.id)
+    from backend.app.models import Assignee
+
+    row = db.get(Assignee, assignee_id)
+    if not row or row.plan_id != plan.id:
+        raise HTTPException(404, "Исполнитель не найден")
+    name = row.name
+    affected = [
+        t.code for t in plan.tasks if (t.assignee or "").strip() == name
+    ]
     ok = delete_assignee(db, plan, assignee_id)
     if not ok:
         raise HTTPException(404, "Исполнитель не найден")
+    inverse = [
+        {"op": "reassign", "filter": {"code": code}, "assignee": name}
+        for code in affected
+    ]
+    log_ui_action(
+        db,
+        plan,
+        kind="assignee_delete",
+        summary=f"assignee delete «{name}»",
+        changes=affected,
+        forward={"name": name, "cleared_codes": affected},
+        inverse_ops=inverse,
+    )
     db.commit()
     return {"ok": True}
 

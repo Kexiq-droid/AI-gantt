@@ -765,29 +765,27 @@ export function GanttChart({
                   onRequestCreate({
                     parent_id: menu.task.parent_id,
                     after_task_id: menu.task.id,
-                    hint: `После «${menu.task.code}»`,
+                    hint: `Задача после «${menu.task.code}»`,
                   })
                   setMenu(null)
                 }}
               >
-                Добавить после…
+                Добавить задачу после
               </button>
-              {hasChildren(menu.task.id) && (
-                <button
-                  type="button"
-                  className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--surface-2)]"
-                  onClick={() => {
-                    onRequestCreate({
-                      parent_id: menu.task.id,
-                      after_task_id: null,
-                      hint: `Внутри «${menu.task.code}»`,
-                    })
-                    setMenu(null)
-                  }}
-                >
-                  Добавить дочернюю…
-                </button>
-              )}
+              <button
+                type="button"
+                className="block w-full px-3 py-2 text-left text-sm hover:bg-[var(--surface-2)]"
+                onClick={() => {
+                  onRequestCreate({
+                    parent_id: menu.task.id,
+                    after_task_id: null,
+                    hint: `Подзадача в «${menu.task.code}»`,
+                  })
+                  setMenu(null)
+                }}
+              >
+                Добавить подзадачу после
+              </button>
               <button
                 type="button"
                 className="block w-full px-3 py-2 text-left text-sm text-[var(--danger)] hover:bg-[var(--surface-2)]"

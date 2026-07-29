@@ -196,7 +196,7 @@ def test_import_without_parent_and_pred_columns():
 def test_import_examples_sample_file():
     from pathlib import Path
 
-    raw = (Path(__file__).resolve().parents[2] / "examples" / "plan_biokad_demo.xlsx").read_bytes()
+    raw = (Path(__file__).resolve().parents[2] / "examples" / "plan_vax_b_demo.xlsx").read_bytes()
     imported = import_plan_xlsx(raw)
     assert not validate_plan_dict(imported)
     assert len(imported["tasks"]) >= 10

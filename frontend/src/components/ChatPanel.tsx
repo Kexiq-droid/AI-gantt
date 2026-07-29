@@ -127,11 +127,11 @@ export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props
       <div className="min-h-0 flex-1 space-y-3 overflow-auto px-4 py-3">
         {messages.length === 0 && (
           <p className="text-sm text-[var(--muted)]">
-            Например: «Сдвинь всю доклинику на 10 дней…» или прикрепите Excel и напишите
+            Например: «Сдвинь всю доклинику на 10 дней…» / «назначь Иванова на CMC» или прикрепите Excel VAX-B
             «импортируй».
           </p>
         )}
-        {messages.map((m) => {
+        {messages.filter((m) => !(m.meta?.hidden || m.meta?.source === 'ui')).map((m) => {
           const selected = m.job_id ? ratings[m.job_id] : undefined
           const d = new Date(m.created_at)
           const key = Number.isNaN(d.getTime()) ? '' : dayKey(d)

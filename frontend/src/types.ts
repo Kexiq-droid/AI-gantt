@@ -46,6 +46,8 @@ export type ChatMessage = {
     tool_calls?: unknown[]
     rating?: 'up' | 'down'
     attachment_name?: string
+    hidden?: boolean
+    source?: string
   } | null
   created_at: string
 }

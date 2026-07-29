@@ -64,21 +64,33 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
 - Вызывать apply_plan_patch без предварительного plan_commands в этом же ходе.
 - Применять только первую часть составного запроса.
 - Писать «готово», если не было успешного apply_plan_patch / import_excel_attachment.
-- Задавать уточнения, если действий ≤ {MAX_BATCH_OPS} и смысл однозначен.
+- Задавать уточнения, если действий ≤ {MAX_BATCH_OPS} и смысл однозначен —
+  ИСКЛЮЧЕНИЕ: массовое удаление (см. ниже) — всегда сначала спроси подтверждение.
+- Удалять всё / много задач без явного «да»/«подтверждаю» от пользователя в следующем сообщении.
 
 ДОПУСТИМО:
-- Короткие «да» / «меняй» / «ок» — подтверждение предыдущего user-запроса из истории; разложи его через plan_commands и примени.
+- Короткие «да» / «меняй» / «ок» — подтверждение предыдущего user-запроса из истории; разложи его через plan_commands и примени (для массового удаления — apply с confirmed=true только после «да»).
 - Импорт прикреплённого Excel → import_excel_attachment (без plan_commands/apply_plan_patch).
 - Только анализ («кто перегружен?») → snapshot, без plan_commands.
+- «Удали все / очисти план» → НЕ вызывай apply. Ответь предупреждением и попроси «да» или «нет».
 
 Интерпретации:
-- Фазы: доклиника/ветка P2→P2, CMC/производство→P3, регуляторика→P4, аналитика→P1, клиника→P5.
+- Фазы: discovery/аналитика/антиген→P1, доклиника→P2, CMC/производство DS–DP→P3,
+  регуляторика/разрешение КИ→P4, клиника I–III→P5, регистрация/ГРЛС→P6,
+  коммерческое/серийное производство→P7.
 - «Назначь X ответственным» в контексте сдвига ветки/фазы → reassign на ту же phase_code.
 - Имена: «Смирнова»/«Иванова» → «Смирнов»/«Иванов».
 - filter.phase_code = фаза и все потомки.
+- Массовый сдвиг всего плана («все задачи», «весь план», «всё», «все фазы») →
+  ОДНА операция shift с filter {{"all": true}} и days (назад = отрицательные).
+  НЕ дроби на сдвиг каждой фазы — это одно действие, лимит batch не мешает.
+- Пустой filter или filter.all=true = все задачи плана.
+- Массовое удаление после подтверждения → ОДНА операция
+  {{"op":"delete","filter":{{"all":true}}}} (не по одной задаче).
 
 Формат operations (поле всегда "op"):
 - {{"op":"swap","codes":["P3","P4"]}}
+- {{"op":"shift","filter":{{"all":true}},"days":-5}}
 - {{"op":"shift","filter":{{"phase_code":"P2"}},"days":10}}
 - {{"op":"shift","filter":{{"code":"T2.1"}},"days":7}}
 - {{"op":"reassign","filter":{{"phase_code":"P3"}},"assignee":"Иванов"}}
@@ -88,6 +100,16 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
 - {{"op":"create","code":"T2.9","parent":"P2","title":"...","duration_days":5,"predecessors":["T2.3"]}}
 - {{"op":"set_deps","code":"T3.1","predecessors":["T2.4"]}}
 - {{"op":"delete","code":"T4.3"}}
+- {{"op":"delete","filter":{{"all":true}}}}
+
+ДЕЙСТВИЯ ПОЛЬЗОВАТЕЛЯ В UI (скрытые сообщения [UI_ACTION] в истории чата):
+- В истории могут быть сообщения вида [UI_ACTION] {{json}} — это правки человека в интерфейсе
+  (create/update/delete/shift/reorder и т.д.). Пользователь их в чате НЕ видит; ты видишь.
+- В json есть id, kind, summary, changes, inverse.operations (патч для отмены ЭТОГО действия).
+- Чтобы отменить конкретное UI-действие: вызови undo_ui_action с action_id.
+- «Отмени последнее действие пользователя» → undo_ui_action без action_id (последнее не-undone).
+- Обычное «отмени» / undo_plan — стек snapshot (LIFO), не точечная отмена UI-действия.
+- Не показывай сырой [UI_ACTION] json пользователю; говори по смыслу («отменил сдвиг T2.1»).
 """
 
 # Примеры отказов (без tool_calls) — якорят поведение на jailbreak/оффтоп.
@@ -119,6 +141,32 @@ _CONFIRM_RE = re.compile(
     re.IGNORECASE,
 )
 
+_CANCEL_RE = re.compile(
+    r"^(нет|отмена|отменить|не надо|не нужно|стоп|cancel|no)[!.,]*$",
+    re.IGNORECASE,
+)
+
+_MASS_DELETE_RE = re.compile(
+    r"^(?:пожалуйста[, ]*)?"
+    r"(?:"
+    r"(?:удали|удалить|удалите)\s+"
+    r"(?:все\s+задачи|всех\s+задач|весь\s+план|все\s+фазы|всё|все)"
+    r"(?:\s+(?:из\s+плана|в\s+плане|полностью))?"
+    r"|"
+    r"(?:очисти|очистить|очистите)\s+"
+    r"(?:весь\s+)?план(?:\s+полностью)?"
+    r")"
+    r"\s*[.!]?$",
+    re.IGNORECASE,
+)
+
+MASS_DELETE_CONFIRM_TEXT = (
+    "Сейчас в плане **{n}** задач (включая фазы). Удаление необратимо "
+    "(кроме кнопки «Отменить» / Undo).\n\n"
+    "Точно удалить всё?\n"
+    "Напишите **да** / **подтверждаю** — или **нет**, чтобы отменить."
+)
+
 _SWAP_PATTERNS = [
     re.compile(
         r"(?:поменяй|поменять|поменяйте|переставь|переставить|swap)\s+"
@@ -135,7 +183,8 @@ _SWAP_PATTERNS = [
 ]
 
 _SHIFT_TASK_RE = re.compile(
-    r"(?:сдвинь|сдвинуть|сдвиньте)\s+(?:задач[уие]\s+)?(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)"
+    r"(?:сдвинь|сдвинуть|сдвиньте|смести|сместить|сместите|перенеси|перенести|перенесите)\s+"
+    r"(?:задач[уие]\s+)?(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)"
     r"\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
     re.IGNORECASE,
 )
@@ -143,12 +192,21 @@ _SHIFT_TASK_RE = re.compile(
 # «T4.1 сдвинь на 7 дней» / «T4.1 CTD… сдвинь на 7»
 _SHIFT_CODE_FIRST_RE = re.compile(
     r"(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)\b.{0,100}?"
-    r"(?:сдвинь|сдвинуть|сдвиньте)\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
+    r"(?:сдвинь|сдвинуть|сдвиньте|смести|сместить|сместите)\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
     re.IGNORECASE | re.DOTALL,
 )
 
 _SHIFT_PHASE_RE = re.compile(
-    r"(?:сдвинь|сдвинуть|сдвиньте)\s+(?:всю\s+)?(?P<body>.+?)\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
+    r"(?:сдвинь|сдвинуть|сдвиньте|смести|сместить|сместите|перенеси|перенести|перенесите)\s+"
+    r"(?:всю\s+)?(?P<body>.+?)\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
+    re.IGNORECASE,
+)
+
+# «сдвинь / смести все задачи | весь план на 5 дней [назад]»
+_SHIFT_ALL_RE = re.compile(
+    r"(?:сдвинь|сдвинуть|сдвиньте|смести|сместить|сместите|перенеси|перенести|перенесите)\s+"
+    r"(?P<body>все\s+задачи|всех\s+задач|весь\s+план|весь\s+график|все\s+фазы|все\s+бары|всё|все)\s+"
+    r"на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
     re.IGNORECASE,
 )
 
@@ -160,16 +218,22 @@ _SHIFT_ELLIPTIC_TASK_RE = re.compile(
 )
 _SHIFT_ELLIPTIC_PHASE_RE = re.compile(
     r"(?:и|,)\s+(?:всю\s+)?"
-    r"(?P<body>доклин\w*|cmc|производ\w*|регулятор\w*|аналитик\w*|клиник\w*|[PpРр]\d+)"
+    r"(?P<body>доклин\w*|cmc|производ\w*|регулятор\w*|аналитик\w*|клиник\w*|"
+    r"discovery|дискавер\w*|антиген\w*|регистрац\w*|коммерч\w*|серийн\w*|[PpРр]\d+)"
     r"\s+на\s+(?P<days>-?\d+)\s*(?:дн\w*)?",
     re.IGNORECASE,
 )
 
 # «верни задачу на 14 дней назад» / «сдвинь T4.1 на 14 дней назад»
 _SHIFT_BACK_RE = re.compile(
-    r"(?:верни|вернуть|верните|откатни|откати|сдвинь|сдвинуть|сдвиньте)\s+"
+    r"(?:верни|вернуть|верните|откатни|откати|сдвинь|сдвинуть|сдвиньте|смести|сместить|сместите)\s+"
     r"(?:задач[уие]\s+)?(?:(?P<code>[A-Za-zА-Яа-я]\d+(?:\.\d+)?)\s+)?"
     r"на\s+(?P<days>\d+)\s*(?:дн\w*)?\s+назад",
+    re.IGNORECASE,
+)
+
+_ALL_PLAN_BODY_RE = re.compile(
+    r"^(?:все\s+задачи|всех\s+задач|весь\s+план|весь\s+график|все\s+фазы|все\s+бары|всё|все)$",
     re.IGNORECASE,
 )
 
@@ -218,11 +282,20 @@ _REASSIGN_RESPONSIBLE_RE = re.compile(
 _REASSIGN_RE = _REASSIGN_PHASE_RE
 
 _PHASE_ALIASES = (
+    # more specific first
+    ("коммерч", "P7"),
+    ("серийн", "P7"),
+    ("регистрац", "P6"),
+    ("грулс", "P6"),
     ("доклин", "P2"),
+    ("discovery", "P1"),
+    ("дискавер", "P1"),
+    ("антиген", "P1"),
+    ("целеполаг", "P1"),
+    ("аналитик", "P1"),
     ("cmc", "P3"),
     ("производ", "P3"),
     ("регулятор", "P4"),
-    ("аналитик", "P1"),
     ("клиник", "P5"),
 )
 
@@ -430,34 +503,56 @@ def _parse_all_shifts(
         used.append(span)
         out.append(item)
 
+    def _signed_days(days: int, span: tuple[int, int]) -> int:
+        # «назад» immediately after the match (or already negative)
+        if days < 0:
+            return days
+        tail = low[span[0] : min(len(low), span[1] + 12)]
+        if "назад" in tail:
+            return -abs(days)
+        return days
+
+    # Whole plan first — one op, never N phase shifts
+    for m in _SHIFT_ALL_RE.finditer(raw):
+        days = _signed_days(int(m.group("days")), m.span())
+        add(m.span(), {"filter": {"all": True}, "days": days})
+
     for m in _SHIFT_BACK_RE.finditer(raw):
-        code = _norm_code(m.group("code")) if m.group("code") else default_code
-        if not code:
+        code = _norm_code(m.group("code")) if m.group("code") else None
+        days = -abs(int(m.group("days")))
+        if code:
+            add(m.span(), {"filter": {"code": code}, "days": days})
             continue
-        add(m.span(), {"filter": {"code": code}, "days": -abs(int(m.group("days")))})
+        # «смести на 5 дней назад» / «верни на 5 дней назад» без цели —
+        # если в фразе есть «все/весь план», уже поймает _SHIFT_ALL_RE
+        prelude = raw[m.start() : m.start("days")].lower()
+        if re.search(r"все\s+задач|весь\s+план|весь\s+график|все\s+фаз|\bвсё\b|\bвсе\b", prelude):
+            add(m.span(), {"filter": {"all": True}, "days": days})
 
     for m in _SHIFT_TASK_RE.finditer(raw):
-        days = int(m.group("days"))
-        if "назад" in low[max(0, m.start() - 5) : m.end() + 10]:
-            days = -abs(days)
+        days = _signed_days(int(m.group("days")), m.span())
         add(
             m.span(),
             {"filter": {"code": _norm_code(m.group("code"))}, "days": days},
         )
 
     for m in _SHIFT_CODE_FIRST_RE.finditer(raw):
-        days = int(m.group("days"))
-        if "назад" in low[m.start() : m.end() + 10]:
-            days = -abs(days)
+        days = _signed_days(int(m.group("days")), m.span())
         add(
             m.span(),
             {"filter": {"code": _norm_code(m.group("code"))}, "days": days},
         )
 
-    has_shift_verb = bool(re.search(r"сдвинь|сдвинуть|сдвиньте", raw, re.I))
+    has_shift_verb = bool(
+        re.search(
+            r"сдвинь|сдвинуть|сдвиньте|смести|сместить|сместите|перенеси|перенести|перенесите",
+            raw,
+            re.I,
+        )
+    )
     if has_shift_verb:
         for m in _SHIFT_ELLIPTIC_TASK_RE.finditer(raw):
-            days = int(m.group("days"))
+            days = _signed_days(int(m.group("days")), m.span())
             add(
                 m.span(),
                 {"filter": {"code": _norm_code(m.group("code"))}, "days": days},
@@ -465,13 +560,15 @@ def _parse_all_shifts(
         for m in _SHIFT_ELLIPTIC_PHASE_RE.finditer(raw):
             phase = _phase_from_text(m.group("body"))
             if phase:
-                add(m.span(), {"filter": {"phase_code": phase}, "days": int(m.group("days"))})
+                days = _signed_days(int(m.group("days")), m.span())
+                add(m.span(), {"filter": {"phase_code": phase}, "days": days})
 
     for m in _SHIFT_PHASE_RE.finditer(raw):
         body = m.group("body").strip()
-        days = int(m.group("days"))
-        if "назад" in low[m.start() : m.end() + 10]:
-            days = -abs(days)
+        days = _signed_days(int(m.group("days")), m.span())
+        if _ALL_PLAN_BODY_RE.fullmatch(body):
+            add(m.span(), {"filter": {"all": True}, "days": days})
+            continue
         if re.fullmatch(r"(?:задач[уие]\s+)?[A-Za-zА-Яа-я]\d+(?:\.\d+)?", body, re.I):
             add(
                 m.span(),
@@ -629,15 +726,30 @@ def _is_confirm(text: str) -> bool:
     return bool(_CONFIRM_RE.match(t))
 
 
+def _is_cancel(text: str) -> bool:
+    t = re.sub(r"\s+", " ", (text or "").strip().lower())
+    t = t.replace("!", "").replace(".", "").strip()
+    return bool(_CANCEL_RE.match(t))
+
+
+def _is_mass_delete(text: str) -> bool:
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    t = t.replace("ё", "е")
+    return bool(_MASS_DELETE_RE.match(t))
+
+
 def _recent_chat_history(
-    db: Session, plan_id: int, current_job_id: int, limit: int = 12
+    db: Session, plan_id: int, current_job_id: int, limit: int = 16
 ) -> list[dict[str, str]]:
-    """Previous user/assistant turns so short follow-ups like «меняй» keep context."""
+    """Previous user/assistant turns so short follow-ups like «меняй» keep context.
+
+    Includes hidden [UI_ACTION] messages (agent-only; filtered from GET /chat/messages).
+    """
     rows = db.scalars(
         select(ChatMessage)
         .where(ChatMessage.plan_id == plan_id)
         .order_by(ChatMessage.id.desc())
-        .limit(limit + 4)
+        .limit(limit + 12)
     ).all()
     rows = list(reversed(rows))
     hist: list[dict[str, str]] = []
@@ -649,7 +761,9 @@ def _recent_chat_history(
         content = (m.content or "").strip()
         if not content:
             continue
-        hist.append({"role": m.role, "content": content[:2500]})
+        # Keep UI action payloads intact for selective undo
+        cap = 4000 if content.startswith("[UI_ACTION]") else 2500
+        hist.append({"role": m.role, "content": content[:cap]})
     return hist[-limit:]
 
 
@@ -664,6 +778,7 @@ def _finish_direct(
     ok: bool,
     error: str | None = None,
     tool_log: list[dict[str, Any]] | None = None,
+    meta_extra: dict[str, Any] | None = None,
 ) -> None:
     job.status = "done" if ok else "failed"
     job.result_summary = summary if ok else None
@@ -672,16 +787,16 @@ def _finish_direct(
     job.validate_ok = ok
     job.tool_calls_json = json.dumps(tool_log or [], ensure_ascii=False)
     job.finished_at = datetime.utcnow()
+    meta: dict[str, Any] = {"changes": changes, "tool_calls": tool_log or []}
+    if meta_extra:
+        meta.update(meta_extra)
     db.add(
         ChatMessage(
             plan_id=plan.id,
             role="assistant",
             content=summary if ok else (error or summary),
             job_id=job.id,
-            meta_json=json.dumps(
-                {"changes": changes, "tool_calls": tool_log or []},
-                ensure_ascii=False,
-            ),
+            meta_json=json.dumps(meta, ensure_ascii=False),
         )
     )
     db.commit()
@@ -695,6 +810,7 @@ def _apply_ops_direct(
     operations: list[dict[str, Any]],
     summary_ok: str,
     model_name: str,
+    confirmed: bool = False,
 ) -> bool:
     """Apply patch without LLM. Returns True if handled."""
     job.status = "running"
@@ -702,11 +818,14 @@ def _apply_ops_direct(
     job.model = model_name
     db.commit()
     started = time.time()
-    result, changes = _run_tool(db, plan, "apply_plan_patch", {"operations": operations}, job=job)
+    args: dict[str, Any] = {"operations": operations}
+    if confirmed:
+        args["confirmed"] = True
+    result, changes = _run_tool(db, plan, "apply_plan_patch", args, job=job)
     tool_log = [
         {
             "name": "apply_plan_patch",
-            "args": {"operations": operations},
+            "args": args,
             "ok": bool(isinstance(result, dict) and result.get("ok")),
             "duration_ms": int((time.time() - started) * 1000),
             "result_preview": json.dumps(result, ensure_ascii=False)[:800],
@@ -760,12 +879,52 @@ def _try_rule_mutations(
     raw_text: str,
     *,
     default_code: str | None = None,
+    confirmed: bool = False,
 ) -> bool:
     """Handle common mutating phrases without LLM. True = handled.
 
     Compound requests (several shifts / reassigns / updates in one message)
     are collected and applied as one batch.
     """
+    if _is_mass_delete(raw_text):
+        from backend.app.services.plan_store import plan_to_dict
+
+        n = len((plan_to_dict(db, plan).get("tasks") or []))
+        if not confirmed:
+            job.provider = "rules"
+            job.model = "confirm_mass_delete"
+            _finish_direct(
+                db,
+                job,
+                plan,
+                summary=MASS_DELETE_CONFIRM_TEXT.format(n=n),
+                changes=[],
+                ok=True,
+                meta_extra={"awaiting_confirm": "mass_delete"},
+            )
+            return True
+        if n == 0:
+            job.provider = "rules"
+            job.model = "clear"
+            _finish_direct(
+                db,
+                job,
+                plan,
+                summary="План уже пуст — удалять нечего.",
+                changes=[],
+                ok=True,
+            )
+            return True
+        return _apply_ops_direct(
+            db,
+            job,
+            plan,
+            operations=[{"op": "delete", "filter": {"all": True}}],
+            summary_ok=f"Удалил все задачи плана ({n}).",
+            model_name="clear",
+            confirmed=True,
+        )
+
     operations: list[dict[str, Any]] = []
     bits: list[str] = []
 
@@ -786,7 +945,10 @@ def _try_rule_mutations(
     for shift in shifts:
         filt = shift["filter"]
         days = shift["days"]
-        target = filt.get("code") or filt.get("phase_code") or filt.get("codes")
+        if filt.get("all"):
+            target = "весь план"
+        else:
+            target = filt.get("code") or filt.get("phase_code") or filt.get("codes")
         direction = "назад" if days < 0 else "вперёд"
         operations.append({"op": "shift", "filter": filt, "days": days})
         bits.append(f"Сдвинул {target} на {abs(days)} дн. {direction}")
@@ -884,7 +1046,9 @@ TOOLS = [
             "description": (
                 "Шаг анализа: разложить ВЕСЬ запрос пользователя на упорядоченный список "
                 f"operations БЕЗ применения к плану. Обязателен перед apply_plan_patch. "
-                f"Если операций больше {MAX_BATCH_OPS} — вернёт need_clarification."
+                f"Если операций больше {MAX_BATCH_OPS} — вернёт need_clarification. "
+                'Сдвиг всего плана («все задачи») = ОДНА операция '
+                '{"op":"shift","filter":{"all":true},"days":N}, не по фазам.'
             ),
             "parameters": {
                 "type": "object",
@@ -910,7 +1074,9 @@ TOOLS = [
             "description": (
                 f"Применить batch-патч атомарно. Максимум {MAX_BATCH_OPS} operations. "
                 "Вызывай только после успешного plan_commands с тем же списком. "
-                "dry_run=true — только превью changes без записи в план."
+                "dry_run=true — только превью changes без записи в план. "
+                "Массовое удаление (delete filter.all / clear): только после «да» пользователя, "
+                "с confirmed=true."
             ),
             "parameters": {
                 "type": "object",
@@ -923,6 +1089,12 @@ TOOLS = [
                         "type": "boolean",
                         "description": "Если true — не менять план, только показать changes",
                     },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": (
+                            "true только если пользователь явно подтвердил массовое удаление"
+                        ),
+                    },
                 },
                 "required": ["operations"],
             },
@@ -934,6 +1106,26 @@ TOOLS = [
             "name": "undo_plan",
             "description": "Откатить последнее изменение плана (undo).",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "undo_ui_action",
+            "description": (
+                "Отменить конкретное действие пользователя в UI по action_id из [UI_ACTION] "
+                "в истории. Без action_id — отменить последнее не-undone UI-действие. "
+                "Не путать с undo_plan (стек snapshot)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action_id": {
+                        "type": "string",
+                        "description": "id из [UI_ACTION] json (12 hex символов)",
+                    },
+                },
+            },
         },
     },
     {
@@ -1054,6 +1246,62 @@ def run_agent_job(db: Session, job_id: int) -> None:
         )
         return
 
+    # rule-based undo specific UI action / last UI action
+    m_ui = re.match(
+        r"^(?:пожалуйста[, ]*)?"
+        r"(?:отмени|отменить|undo)\s+"
+        r"(?:ui\s+)?"
+        r"(?:действие|action)\s+"
+        r"([a-f0-9]{6,16})\s*[.!]?$",
+        text,
+        re.IGNORECASE,
+    )
+    if m_ui:
+        job.status = "running"
+        db.commit()
+        result, changes = execute_tool(
+            db, plan, "undo_ui_action", {"action_id": m_ui.group(1)}, job=job, ctx={}
+        )
+        ok = bool(result.get("ok"))
+        _finish_direct(
+            db,
+            job,
+            plan,
+            summary=result.get("message")
+            or ("Отменил действие UI." if ok else "Не удалось отменить действие UI."),
+            changes=changes if ok else [],
+            ok=ok,
+            error=None if ok else "; ".join(result.get("errors") or [result.get("message") or ""]),
+            tool_log=[{"name": "undo_ui_action", "args": {"action_id": m_ui.group(1)}, "result": result}],
+        )
+        return
+
+    if re.match(
+        r"^(?:пожалуйста[, ]*)?"
+        r"(?:отмени|отменить|undo)\s+"
+        r"(?:последнее\s+)?"
+        r"(?:действие\s+(?:пользователя|в\s+ui|ui)|ui\s+действие)"
+        r"\s*[.!]?$",
+        text,
+        re.IGNORECASE,
+    ):
+        job.status = "running"
+        db.commit()
+        result, changes = execute_tool(db, plan, "undo_ui_action", {}, job=job, ctx={})
+        ok = bool(result.get("ok"))
+        _finish_direct(
+            db,
+            job,
+            plan,
+            summary=result.get("message")
+            or ("Отменил последнее действие UI." if ok else "Нечего отменять."),
+            changes=changes if ok else [],
+            ok=ok,
+            error=None if ok else "; ".join(result.get("errors") or [result.get("message") or ""]),
+            tool_log=[{"name": "undo_ui_action", "args": {}, "result": result}],
+        )
+        return
+
     # rule-based undo / redo
     undo_cmds = {
         "отмени",
@@ -1113,9 +1361,29 @@ def run_agent_job(db: Session, job_id: int) -> None:
     )
 
     def _rules_fallback() -> bool:
-        """Built-in parsers when LLM unavailable (or after LLM hard failure)."""
-        if _try_rule_mutations(db, job, plan, raw_text, default_code=default_code):
-            return True
+        """Built-in parsers for clear NL intents (prefer before LLM when possible)."""
+        if _is_cancel(raw_text):
+            # Cancel pending mass-delete confirmation
+            for m in reversed(hist_preview):
+                if m["role"] != "assistant":
+                    continue
+                if "awaiting_confirm" in (m.get("content") or "") or "Точно удалить" in (
+                    m.get("content") or ""
+                ):
+                    job.provider = "rules"
+                    job.model = "cancel"
+                    _finish_direct(
+                        db,
+                        job,
+                        plan,
+                        summary="Отменено: ничего не удаляю.",
+                        changes=[],
+                        ok=True,
+                    )
+                    return True
+                break
+            return False
+
         if _is_confirm(raw_text):
             last_user: str | None = None
             for m in reversed(hist_preview):
@@ -1123,15 +1391,28 @@ def run_agent_job(db: Session, job_id: int) -> None:
                     last_user = m["content"]
                     break
             if last_user and _try_rule_mutations(
-                db, job, plan, last_user, default_code=default_code
+                db,
+                job,
+                plan,
+                last_user,
+                default_code=default_code,
+                confirmed=True,
             ):
                 return True
+            return False
+
+        if _try_rule_mutations(
+            db, job, plan, raw_text, default_code=default_code, confirmed=False
+        ):
+            return True
         return False
+
+    # Known mutating phrases (shift all / phase / reassign / …) — без LLM
+    if _rules_fallback():
+        return
 
     client_info = _client()
     if not client_info:
-        if _rules_fallback():
-            return
         job.status = "failed"
         job.error = "Ассистент временно недоступен: не настроен LLM API ключ."
         job.finished_at = datetime.utcnow()
@@ -1225,7 +1506,12 @@ def run_agent_job(db: Session, job_id: int) -> None:
                         )
                     elif (
                         tc.function.name
-                        in ("apply_plan_patch", "import_excel_attachment", "undo_plan")
+                        in (
+                            "apply_plan_patch",
+                            "import_excel_attachment",
+                            "undo_plan",
+                            "undo_ui_action",
+                        )
                         and ok
                         and not (isinstance(result, dict) and result.get("dry_run"))
                     ):

@@ -20,6 +20,7 @@ from backend.app.schemas import (
 from backend.app.services.agent import run_agent_job
 from backend.app.services.plan_store import ensure_user_plan
 from backend.app.services.serializers import job_to_dict
+from backend.app.services.ui_actions import is_hidden_chat_meta
 
 router = APIRouter(prefix="/api", tags=["chat"])
 
@@ -123,6 +124,8 @@ def messages(user: User = Depends(get_current_user), db: Session = Depends(get_d
                 meta = json.loads(m.meta_json)
             except json.JSONDecodeError:
                 meta = None
+        if is_hidden_chat_meta(meta):
+            continue
         if m.role == "assistant" and m.job_id and m.job_id in jobs_by_id:
             rating = jobs_by_id[m.job_id].rating
             if rating:

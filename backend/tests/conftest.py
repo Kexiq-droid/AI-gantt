@@ -19,7 +19,7 @@ from backend.app.models import Plan, User
 from backend.app.services.plan_store import load_seed_into_plan
 
 
-EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_biokad_demo.xlsx"
+EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_vax_b_demo.xlsx"
 
 
 @pytest.fixture()

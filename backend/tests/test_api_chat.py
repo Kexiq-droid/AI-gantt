@@ -7,7 +7,7 @@ import pytest
 from backend.app.models import AgentJob, ChatMessage
 from backend.app.services.agent import run_agent_job
 
-EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_biokad_demo.xlsx"
+EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_vax_b_demo.xlsx"
 
 
 @pytest.fixture()
@@ -83,7 +83,7 @@ def test_multipart_import_via_chat(login_pm, SessionLocal, no_llm, no_chat_bg, t
         data={"message": "импортируй"},
         files={
             "file": (
-                "plan_biokad_demo.xlsx",
+                "plan_vax_b_demo.xlsx",
                 content,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
@@ -136,6 +136,81 @@ def test_chat_undo(login_pm, SessionLocal, no_llm):
     assert restored["title"] == original
 
 
+def test_mass_delete_asks_confirm_then_clears(login_pm, SessionLocal, no_llm):
+    """«Удали все» → confirm; «да» → empty plan."""
+    from backend.app.models import Plan, User, Task, ChatMessage
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        user = db.scalars(select(User).where(User.login == "pm")).first()
+        plan = db.scalars(select(Plan).where(Plan.user_id == user.id)).first()
+        n_before = db.query(Task).filter(Task.plan_id == plan.id).count()
+        assert n_before > 0
+
+        job1 = AgentJob(plan_id=plan.id, status="queued", request_text="Удали все задачи")
+        db.add(job1)
+        db.flush()
+        db.add(
+            ChatMessage(
+                plan_id=plan.id, role="user", content="Удали все задачи", job_id=job1.id
+            )
+        )
+        db.commit()
+        run_agent_job(db, job1.id)
+        db.refresh(job1)
+        assert job1.status == "done"
+        assert job1.provider == "rules"
+        assert "Точно удалить" in (job1.result_summary or "")
+        assert db.query(Task).filter(Task.plan_id == plan.id).count() == n_before
+
+        job2 = AgentJob(plan_id=plan.id, status="queued", request_text="да")
+        db.add(job2)
+        db.flush()
+        db.add(ChatMessage(plan_id=plan.id, role="user", content="да", job_id=job2.id))
+        db.commit()
+        run_agent_job(db, job2.id)
+        db.refresh(job2)
+        assert job2.status == "done", job2.error
+        assert db.query(Task).filter(Task.plan_id == plan.id).count() == 0
+        assert "Удалил все" in (job2.result_summary or "")
+    finally:
+        db.close()
+
+
+def test_mass_delete_cancel(login_pm, SessionLocal, no_llm):
+    from backend.app.models import Plan, User, Task, ChatMessage
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        user = db.scalars(select(User).where(User.login == "pm")).first()
+        plan = db.scalars(select(Plan).where(Plan.user_id == user.id)).first()
+        n_before = db.query(Task).filter(Task.plan_id == plan.id).count()
+
+        job1 = AgentJob(plan_id=plan.id, status="queued", request_text="Удали все")
+        db.add(job1)
+        db.flush()
+        db.add(
+            ChatMessage(plan_id=plan.id, role="user", content="Удали все", job_id=job1.id)
+        )
+        db.commit()
+        run_agent_job(db, job1.id)
+
+        job2 = AgentJob(plan_id=plan.id, status="queued", request_text="нет")
+        db.add(job2)
+        db.flush()
+        db.add(ChatMessage(plan_id=plan.id, role="user", content="нет", job_id=job2.id))
+        db.commit()
+        run_agent_job(db, job2.id)
+        db.refresh(job2)
+        assert job2.status == "done"
+        assert "Отменено" in (job2.result_summary or "")
+        assert db.query(Task).filter(Task.plan_id == plan.id).count() == n_before
+    finally:
+        db.close()
+
+
 def test_rating_endpoint(login_pm, SessionLocal, no_llm):
     db = SessionLocal()
     try:
@@ -157,6 +232,7 @@ def test_rating_endpoint(login_pm, SessionLocal, no_llm):
     )
     assert r.status_code == 200
     assert r.json()["rating"] == "up"
+
 
 
 def test_chat_jobs_serialized_per_plan(login_pm, SessionLocal, monkeypatch):

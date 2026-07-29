@@ -14,7 +14,7 @@ from backend.app.services.plan_store import (
     restore_snapshot,
 )
 
-EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_biokad_demo.xlsx"
+EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_vax_b_demo.xlsx"
 
 
 def test_undo_restores_title_and_tasks(db, mini_plan):

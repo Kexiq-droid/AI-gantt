@@ -99,6 +99,55 @@ def _plan():
     }
 
 
+def test_parse_shift_all_tasks_back():
+    text = "Смести все задачи на 5 дней назад"
+    shifts = _parse_all_shifts(text)
+    assert shifts == [{"filter": {"all": True}, "days": -5}]
+
+
+def test_is_mass_delete_phrases():
+    from backend.app.services.agent import _is_mass_delete, _is_cancel, _is_confirm
+
+    assert _is_mass_delete("Удали все задачи")
+    assert _is_mass_delete("удали все")
+    assert _is_mass_delete("Очисти план")
+    assert _is_mass_delete("очисти весь план")
+    assert _is_mass_delete("Удали T2.1") is False
+    assert _is_confirm("да")
+    assert _is_confirm("подтверждаю")
+    assert _is_cancel("нет")
+    assert _is_cancel("отмена")
+
+
+def test_patch_clear_all():
+    plan = _plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan, {"operations": [{"op": "delete", "filter": {"all": True}}]}
+    )
+    assert not errors
+    assert new_plan["tasks"] == []
+    assert set(changes) == {"P2", "T2.1", "P3", "T3.1", "T3.2", "P4", "T4.1"}
+
+
+def test_parse_shift_whole_plan_forward():
+    text = "Сдвинь весь план на 3 дня"
+    shifts = _parse_all_shifts(text)
+    assert shifts == [{"filter": {"all": True}, "days": 3}]
+
+
+def test_patch_shift_all_moves_every_task():
+    plan = _plan()
+    before = {t["code"]: t["start_date"] for t in plan["tasks"]}
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan, {"operations": [{"op": "shift", "filter": {"all": True}, "days": -5}]}
+    )
+    assert not errors
+    after = {t["code"]: t["start_date"] for t in new_plan["tasks"]}
+    assert set(changes) == set(before)
+    assert after["T2.1"] == "2026-07-23"
+    assert after["T3.1"] == "2026-08-05"
+
+
 def test_parse_compound_shift_and_reassign():
     shifts = _parse_all_shifts(GOLDEN)
     reassigns = _parse_all_reassigns(GOLDEN)

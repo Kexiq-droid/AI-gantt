@@ -8,7 +8,7 @@ from openpyxl import load_workbook
 
 from backend.app.seed_data import PLAN_START
 
-EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_biokad_demo.xlsx"
+EXAMPLE_XLSX = Path(__file__).resolve().parents[2] / "examples" / "plan_vax_b_demo.xlsx"
 
 
 def test_get_current_plan(login_pm):
@@ -51,7 +51,7 @@ def test_import_demo_xlsx(login_pm):
         "/api/plans/current/import",
         files={
             "file": (
-                "plan_biokad_demo.xlsx",
+                "plan_vax_b_demo.xlsx",
                 content,
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )

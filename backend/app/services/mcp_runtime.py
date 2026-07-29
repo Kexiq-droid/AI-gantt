@@ -29,6 +29,33 @@ CLARIFY_OVER_LIMIT = (
     "(остальные сделаем следующим сообщением)."
 )
 
+MASS_DELETE_NEED_CONFIRM = (
+    "Массовое удаление требует явного подтверждения пользователя в чате "
+    "(«да» / «подтверждаю» после предупреждения). Не применяйте патч без подтверждения."
+)
+
+
+def _is_mass_delete_ops(operations: list[Any]) -> bool:
+    """True if ops would wipe many/all tasks — must be confirmed."""
+    ops = operations or []
+    for op in ops:
+        if not isinstance(op, dict):
+            continue
+        kind = op.get("op") or op.get("type")
+        if kind == "clear":
+            return True
+        if kind == "delete" and (
+            op.get("all") is True or (op.get("filter") or {}).get("all") is True
+        ):
+            return True
+    deletes = [
+        op
+        for op in ops
+        if isinstance(op, dict) and (op.get("op") or op.get("type")) == "delete"
+    ]
+    return len(deletes) >= 2
+
+
 # Exported over MCP stdio (Cursor). Chat may also use chat-only tools below.
 MCP_PUBLIC_TOOLS = frozenset(
     {
@@ -129,6 +156,20 @@ def execute_tool(
         operations = args.get("operations") or []
         if not isinstance(operations, list):
             return {"ok": False, "errors": ["operations must be an array"]}, []
+        if _is_mass_delete_ops(operations):
+            ctx["planned_ops"] = None
+            ctx["need_clarification"] = True
+            return {
+                "ok": False,
+                "need_confirmation": True,
+                "count": len(operations),
+                "message": (
+                    "Массовое удаление: не применяй патч. Ответь пользователю "
+                    "предупреждением и попроси «да»/«нет». После «да» — одна операция "
+                    'delete filter.all=true с confirmed=true.'
+                ),
+                "operations_preview": operations[:8],
+            }, []
         limited = ops_limit_result(operations)
         if limited:
             ctx["planned_ops"] = None
@@ -149,10 +190,18 @@ def execute_tool(
     if name == "apply_plan_patch":
         operations = args.get("operations") or []
         dry_run = bool(args.get("dry_run"))
+        confirmed = bool(args.get("confirmed"))
         limited = ops_limit_result(operations)
         if limited:
             ctx["need_clarification"] = True
             return limited, []
+        if _is_mass_delete_ops(operations) and not confirmed and not dry_run:
+            return {
+                "ok": False,
+                "need_confirmation": True,
+                "errors": [MASS_DELETE_NEED_CONFIRM],
+                "message": MASS_DELETE_NEED_CONFIRM,
+            }, []
         if ctx.get("require_plan") and ctx.get("planned_ops") is None and not dry_run:
             return {
                 "ok": False,
@@ -189,6 +238,64 @@ def execute_tool(
         if ok:
             return {"ok": True, "message": "Вернул предыдущее состояние плана."}, []
         return {"ok": False, "errors": ["Стек возврата пуст"], "message": "Нечего возвращать."}, []
+
+    if name == "undo_ui_action":
+        from backend.app.services.ui_actions import (
+            find_ui_action,
+            latest_ui_action,
+            mark_ui_action_undone,
+        )
+
+        action_id = str(args.get("action_id") or "").strip()
+        found = (
+            find_ui_action(db, plan.id, action_id)
+            if action_id
+            else latest_ui_action(db, plan.id)
+        )
+        if not found:
+            return {
+                "ok": False,
+                "errors": ["UI-действие не найдено"],
+                "message": "Не нашёл указанное действие пользователя в UI.",
+            }, []
+        message, payload = found
+        if payload.get("undone"):
+            return {
+                "ok": False,
+                "errors": ["Уже отменено"],
+                "message": f"Действие {payload.get('id')} уже было отменено.",
+            }, []
+        ops = (payload.get("inverse") or {}).get("operations") or []
+        if not ops:
+            return {
+                "ok": False,
+                "errors": ["Нет inverse.operations"],
+                "message": (
+                    f"У действия {payload.get('id')} ({payload.get('kind')}) нет "
+                    "точечной отмены. Используй undo_plan для стека snapshot."
+                ),
+            }, []
+        snap = plan_to_dict(db, plan)
+        new_plan, changes, errors = apply_plan_patch_dict(
+            snap, {"operations": ops}, changed_by="agent"
+        )
+        if errors:
+            return {"ok": False, "errors": errors, "message": "; ".join(errors)}, []
+        push_snapshot(db, plan, source="agent")
+        _replace_plan_content(db, plan, new_plan, changed_by="agent")
+        db.flush()
+        from backend.app.services.assignees import sync_assignees_from_tasks
+
+        sync_assignees_from_tasks(db, plan)
+        mark_ui_action_undone(db, message, payload)
+        db.flush()
+        summary = payload.get("summary") or payload.get("id")
+        return {
+            "ok": True,
+            "action_id": payload.get("id"),
+            "changes": changes,
+            "message": f"Отменил действие UI «{summary}».",
+        }, changes
 
     if name == "list_overloaded_assignees":
         top_n = int(args.get("top_n") or 5)

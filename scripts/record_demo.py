@@ -15,7 +15,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "docs" / "_demo_capture"
 GIF_PATH = ROOT / "docs" / "demo.gif"
-XLSX = ROOT / "examples" / "plan_biokad_demo.xlsx"
+XLSX = ROOT / "examples" / "plan_vax_b_demo.xlsx"
 BASE = "http://127.0.0.1:8100"
 PROMPT = "Сдвинь всю доклинику на 10 дней и назначь Иванова на все задачи фазы CMC"
 
