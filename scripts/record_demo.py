@@ -18,6 +18,7 @@ from playwright.sync_api import sync_playwright
 ROOT = Path(__file__).resolve().parents[1]
 OUT_DIR = ROOT / "docs" / "_demo_capture"
 GIF_PATH = ROOT / "docs" / "demo.gif"
+XLSX = ROOT / "examples" / "plan_vax_b_demo.xlsx"
 BASE = "http://127.0.0.1:8100"
 
 # Main agent demo beats (order matters for a readable story)
@@ -114,17 +115,21 @@ def main() -> int:
         page.get_by_text("BioPlan", exact=False).first.wait_for()
         hold(page, 1.5)
 
-        # Clean seed so demo starts predictable
-        page.get_by_role("button", name="Сбросить демо").click()
-        dialog = page.get_by_role("dialog", name="Восстановить демо-план?")
-        dialog.get_by_role("button", name="Сбросить", exact=True).click()
-        page.get_by_text("Демо-план восстановлен").wait_for(timeout=15_000)
-        hold(page, 1.5)
+        # Start from empty plan, then import sample Excel
+        page.get_by_role("button", name="Очистить план").click()
+        dialog = page.get_by_role("dialog", name="Очистить план?")
+        dialog.get_by_role("button", name="Очистить", exact=True).click()
+        page.get_by_text("План очищен").wait_for(timeout=15_000)
+        hold(page, 1.2)
+
+        page.locator('input[type="file"][accept=".xlsx"]').set_input_files(str(XLSX))
+        page.get_by_text("План импортирован").wait_for(timeout=30_000)
+        hold(page, 2.0)
 
         ensure_chat_open(page)
 
-        # 2. Show seeded VAX-B Gantt
-        hold(page, 2.5)
+        # Show imported Gantt briefly
+        hold(page, 2.0)
 
         # 3–7. Agent prompts
         for prompt, pause in PROMPTS:

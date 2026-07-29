@@ -30,7 +30,7 @@ from backend.app.services.excel_io import (
 from backend.app.services.plan_store import (
     apply_imported_xlsx,
     ensure_user_plan,
-    load_seed_into_plan,
+    load_empty_plan,
     plan_to_dict,
     push_snapshot,
     restore_snapshot,
@@ -620,7 +620,7 @@ def reset_seed(user: User = Depends(require_editor), db: Session = Depends(get_d
     db.execute(delete(AgentJob).where(AgentJob.plan_id == plan.id))
     db.execute(delete(PlanSnapshot).where(PlanSnapshot.plan_id == plan.id))
     db.execute(delete(Assignee).where(Assignee.plan_id == plan.id))
-    load_seed_into_plan(db, plan)
+    load_empty_plan(db, plan)
     db.commit()
     db.refresh(plan)
     return serialize_plan(db, plan)

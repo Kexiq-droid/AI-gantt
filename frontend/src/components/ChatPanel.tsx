@@ -127,8 +127,8 @@ export function ChatPanel({ messages, busy, onSend, onRated, onCollapse }: Props
       <div className="min-h-0 flex-1 space-y-3 overflow-auto px-4 py-3">
         {messages.length === 0 && (
           <p className="text-sm text-[var(--muted)]">
-            Например: «Сдвинь всю доклинику на 10 дней…» / «назначь Иванова на CMC» или прикрепите Excel VAX-B
-            «импортируй».
+            Например: «добавь задачу…», «сдвинь сроки…», «кто перегружен?» или прикрепите Excel
+            и напишите «импортируй».
           </p>
         )}
         {messages.filter((m) => !(m.meta?.hidden || m.meta?.source === 'ui')).map((m) => {

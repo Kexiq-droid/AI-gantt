@@ -303,6 +303,11 @@ export function GanttChart({
         <div>
           <div className="text-xs uppercase tracking-wide text-[var(--muted)]">План</div>
           <h2 className="text-lg leading-tight">{plan.title}</h2>
+          {plan.tasks.length === 0 && (
+            <div className="mt-0.5 text-xs text-[var(--muted)]">
+              Пустой проект — добавьте задачу (ПКМ) или импортируйте Excel
+            </div>
+          )}
           {selectedIds.length > 0 && (
             <div className="mt-0.5 text-xs text-[var(--accent)]">
               Выделено: {selectedIds.length} · Ctrl+клик — добавить/убрать

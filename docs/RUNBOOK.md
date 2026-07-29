@@ -23,11 +23,11 @@
 2. `systemctl restart bioplan-api`
 3. Проверить `"llm":"ok"` в `/api/health`.
 
-## Сброс демо
+## Очистка плана
 
 ```bash
 cd /var/CRM_test && . .venv/bin/activate && PYTHONPATH=/var/CRM_test make seed
-# или кнопка «Сбросить демо» в UI
+# или кнопка «Очистить план» в UI (пустой проект)
 ```
 
 ## TLS / DNS
@@ -49,5 +49,5 @@ systemctl reload nginx
 |---------|----------|
 | Чат: ассистент недоступен | Нет ключа / `llm: degraded` — добавить ключ |
 | 401 после логина | `COOKIE_SECURE=true` требует HTTPS |
-| Пустой план | `make seed` или reset-seed |
-| nginx 404 на HTTPS без SNI | Открывать по имени `https://bio.2alexs.ru` |
+| Пустой план | ожидаемо после `make seed` / «Очистить план»; импорт Excel или создание задач |
+| nginx 404 на HTTPS без SNI | Открывать по имени хоста из сертификата |
