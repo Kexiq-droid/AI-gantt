@@ -21,7 +21,6 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60 * 24 * 7
 
     demo_pm_password: str = "pm12345"
-    demo_viewer_password: str = "viewer123"
 
     llm_provider: str = "timeweb"
     deepseek_api_key: str = ""

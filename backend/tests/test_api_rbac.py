@@ -1,6 +1,4 @@
-"""RBAC: viewer is read-only; editor may mutate."""
-
-from backend.app.config import get_settings
+"""RBAC: viewer role is read-only; editor may mutate."""
 
 
 def test_viewer_me_has_role(login_viewer):
@@ -42,12 +40,3 @@ def test_viewer_cannot_mutate(login_viewer):
 
     r = login_viewer.post("/api/plans/current/reset-seed")
     assert r.status_code == 403
-
-
-def test_viewer_password_from_settings(client):
-    settings = get_settings()
-    r = client.post(
-        "/api/auth/login",
-        json={"login": "viewer", "password": settings.demo_viewer_password},
-    )
-    assert r.status_code == 200

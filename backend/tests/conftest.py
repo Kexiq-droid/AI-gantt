@@ -61,19 +61,19 @@ def db(SessionLocal) -> Generator[Session, None, None]:
 
 @pytest.fixture()
 def seeded_db(db: Session) -> Session:
-    """Users pm/viewer + full seed plan for each."""
+    """User pm + full seed plan."""
     settings = get_settings()
-    for login, password, role in (
-        ("pm", settings.demo_pm_password, "editor"),
-        ("viewer", settings.demo_viewer_password, "viewer"),
-    ):
-        user = User(login=login, password_hash=hash_password(password), role=role)
-        db.add(user)
-        db.flush()
-        plan = Plan(user_id=user.id, title="tmp", start_date=__import__("datetime").date.today())
-        db.add(plan)
-        db.flush()
-        load_seed_into_plan(db, plan)
+    user = User(
+        login="pm",
+        password_hash=hash_password(settings.demo_pm_password),
+        role="editor",
+    )
+    db.add(user)
+    db.flush()
+    plan = Plan(user_id=user.id, title="tmp", start_date=__import__("datetime").date.today())
+    db.add(plan)
+    db.flush()
+    load_seed_into_plan(db, plan)
     db.commit()
     return db
 
@@ -163,7 +163,7 @@ def app(engine, SessionLocal, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
 @pytest.fixture()
 def client(app: FastAPI, seeded_db: Session) -> Generator[TestClient, None, None]:
-    """HTTP client against seeded temp DB (pm / viewer)."""
+    """HTTP client against seeded temp DB (pm)."""
     with TestClient(app) as c:
         yield c
 
@@ -180,11 +180,32 @@ def login_pm(client: TestClient) -> TestClient:
 
 
 @pytest.fixture()
-def login_viewer(client: TestClient) -> TestClient:
-    settings = get_settings()
-    r = client.post(
-        "/api/auth/login",
-        json={"login": "viewer", "password": settings.demo_viewer_password},
+def login_viewer(app: FastAPI, seeded_db: Session) -> Generator[TestClient, None, None]:
+    """Ad-hoc read-only user (not part of product seed)."""
+    from backend.app.models import Plan
+    from backend.app.services.plan_store import load_seed_into_plan
+
+    viewer = User(
+        login="viewer",
+        password_hash=hash_password("viewer-test"),
+        role="viewer",
     )
-    assert r.status_code == 200, r.text
-    return client
+    seeded_db.add(viewer)
+    seeded_db.flush()
+    plan = Plan(
+        user_id=viewer.id,
+        title="tmp",
+        start_date=__import__("datetime").date.today(),
+    )
+    seeded_db.add(plan)
+    seeded_db.flush()
+    load_seed_into_plan(seeded_db, plan)
+    seeded_db.commit()
+
+    with TestClient(app) as c:
+        r = c.post(
+            "/api/auth/login",
+            json={"login": "viewer", "password": "viewer-test"},
+        )
+        assert r.status_code == 200, r.text
+        yield c
