@@ -166,9 +166,10 @@ Web-чат и Cursor используют одну tool surface (`backend/app/se
 | `make seed` | пользователь `pm` + демо-план |
 | `make build` | сборка frontend |
 | `make up` | build + uvicorn :8100 |
-| `make test` | pytest (backend) + Vitest (frontend) |
+| `make test` | pytest + Vitest + Playwright e2e |
 | `make test-backend` | только pytest |
 | `make test-frontend` | только Vitest |
+| `make test-e2e` | Playwright happy-path (поднимает временный uvicorn) |
 
 ## Примеры команд ассистенту
 
@@ -182,7 +183,8 @@ Web-чат и Cursor используют одну tool surface (`backend/app/se
 
 ## Документы
 
-- [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) — исходное ТЗ + блок «Статус сдачи»  
+- [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) — что сдано (краткий scope)  
+- [docs/TECHNICAL_SPEC_FULL.md](docs/TECHNICAL_SPEC_FULL.md) — архив исходного ТЗ  
 - [ROADMAP_TO_PRODUCTION.md](ROADMAP_TO_PRODUCTION.md) — путь к пилоту: Now → Next → Later  
 - [docs/DECISIONS.md](docs/DECISIONS.md) — архитектурные решения  
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — эксплуатация на сервере  
@@ -192,5 +194,5 @@ Web-чат и Cursor используют одну tool surface (`backend/app/se
 ## Как использовались AI-ассистенты
 
 - **Cursor** — каркас FastAPI/React, UI, Excel, агент, MCP, деплой и документация.  
-- Контракт tools и инварианты зафиксированы в `TECHNICAL_SPEC.md`.  
-- Качество агента: журнал (`/api/agent/*`), pytest, прогон команд на стенде.
+- Scope сдачи: `TECHNICAL_SPEC.md`; исходное ТЗ: `docs/TECHNICAL_SPEC_FULL.md`.  
+- Качество: pytest, Vitest, Playwright e2e (`make test`).

@@ -100,4 +100,4 @@ flowchart LR
 | Validate-before-apply, atomic patch, лимит batch | Не ослаблять при выносе в worker |
 | Undo/redo стек снимков | Сохранить семантику после смены БД |
 
-Архитектурные решения MVP: [docs/DECISIONS.md](docs/DECISIONS.md). Объём тестового: [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md).
+Архитектурные решения MVP: [docs/DECISIONS.md](docs/DECISIONS.md). Объём сдачи: [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md).
