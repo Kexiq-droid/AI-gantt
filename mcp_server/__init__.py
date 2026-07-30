@@ -1,7 +1,9 @@
 """
 BioPlan MCP server — same tools the FastAPI agent uses (mcp_runtime).
 
-Run: PYTHONPATH=/var/CRM_test .venv/bin/python -m mcp_server
+Run from repo root:
+  PYTHONPATH=. .venv/bin/python -m mcp_server
+
 Cursor config: see README.
 """
 

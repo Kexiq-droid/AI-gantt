@@ -180,7 +180,7 @@ Web-чат и Cursor используют одну tool surface (`backend/app/se
 
 ## Документы
 
-- [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) — ТЗ и объём MVP  
+- [TECHNICAL_SPEC.md](TECHNICAL_SPEC.md) — исходное ТЗ + блок «Статус сдачи»  
 - [ROADMAP_TO_PRODUCTION.md](ROADMAP_TO_PRODUCTION.md) — путь к пилоту: Now → Next → Later  
 - [docs/DECISIONS.md](docs/DECISIONS.md) — архитектурные решения  
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — эксплуатация на сервере  

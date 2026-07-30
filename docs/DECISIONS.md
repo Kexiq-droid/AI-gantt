@@ -8,13 +8,13 @@
 
 **Consequences:** Больше своего кода, зато полный контроль UX и лицензий. Сложный MS Project-паритет не цель MVP.
 
-## ADR-002: Timeweb Cloud AI (+ DeepSeek / OpenAI fallback)
+## ADR-002: DeepSeek V4 Flash (+ Timeweb / OpenAI fallback)
 
 **Context:** Требуется LLM через API и tool calling. Бюджет и скорость важны; для демо нужна страховка.
 
-**Decision:** По умолчанию `LLM_PROVIDER=timeweb` (OpenAI-compatible endpoint агента Timeweb). Запасные провайдеры: `deepseek`, `openai`. Thinking mode выключен.
+**Decision:** По умолчанию `LLM_PROVIDER=deepseek` и модель **DeepSeek V4 Flash** — её достаточно для задач ассистента. Запасные провайдеры: `timeweb` (OpenAI-compatible gateway), `openai`. Thinking mode выключен.
 
-**Consequences:** Нужна серверная валидация патчей. Для продакшена фармы внешний провайдер — compliance-долг (см. Roadmap).
+**Consequences:** Нужна серверная валидация патчей. Внешний LLM — compliance-долг для чувствительных контуров (см. Roadmap).
 
 ## ADR-003: SQLite + in-process jobs
 

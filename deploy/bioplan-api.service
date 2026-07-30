@@ -5,10 +5,11 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/var/CRM_test
-Environment=PYTHONPATH=/var/CRM_test
-EnvironmentFile=/var/CRM_test/.env
-ExecStart=/var/CRM_test/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8100
+# Replace /path/to/AI-gantt with the absolute path to your clone
+WorkingDirectory=/path/to/AI-gantt
+Environment=PYTHONPATH=/path/to/AI-gantt
+EnvironmentFile=/path/to/AI-gantt/.env
+ExecStart=/path/to/AI-gantt/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8100
 Restart=on-failure
 RestartSec=3
 

@@ -10,12 +10,6 @@ from sqlalchemy.orm import Session
 from backend.app.models import AgentJob, Dependency, Plan, PlanSnapshot, Task
 from backend.app.seed_data import PLAN_START, PLAN_TITLE, SEED_TASKS, compute_schedule
 
-EMPTY_PLAN_TITLE = "Новый проект"
-
-
-def empty_plan_start() -> date:
-    return date.today()
-
 
 def task_end(start: date, duration_days: int) -> date:
     return start + timedelta(days=max(duration_days, 0))
@@ -256,22 +250,6 @@ def load_seed_into_plan(db: Session, plan: Plan) -> None:
     payload = {"title": PLAN_TITLE, "start_date": PLAN_START.isoformat(), "tasks": rows}
     plan.title = PLAN_TITLE
     plan.start_date = PLAN_START
-    _replace_plan_content(db, plan, payload, changed_by="user")
-    from backend.app.services.assignees import sync_assignees_from_tasks
-
-    sync_assignees_from_tasks(db, plan)
-
-
-def load_empty_plan(db: Session, plan: Plan) -> None:
-    """Reset plan to an empty project (no tasks)."""
-    start = empty_plan_start()
-    payload = {
-        "title": EMPTY_PLAN_TITLE,
-        "start_date": start.isoformat(),
-        "tasks": [],
-    }
-    plan.title = EMPTY_PLAN_TITLE
-    plan.start_date = start
     _replace_plan_content(db, plan, payload, changed_by="user")
     from backend.app.services.assignees import sync_assignees_from_tasks
 

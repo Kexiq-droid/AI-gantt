@@ -1,15 +1,32 @@
 # BioPlan — Technical Specification
 
-**Product:** BioPlan — AI-native interactive Gantt for R&D project planning  
-**Target:** АО «БИОКАД» test assignment (Full-stack AI-native, React + FastAPI + MCP + LLM)  
-**Deploy:** `https://Bio.2alexs.ru`  
+**Product:** BioPlan — контроль проектной деятельности с ИИ-ассистентом (демо-сценарий: R&D-план VAX-B)  
+**Target:** тестовое задание (Full-stack AI-native, React + FastAPI + MCP + LLM)  
 **Timeline:** 2 days (MVP with explicit cut-line)
+
+---
+
+## Статус сдачи (актуально для репозитория)
+
+Исходный текст ниже — зафиксированный scope ТЗ. Реализация отличается в следующем:
+
+| Тема | В сдаче |
+|------|---------|
+| Позиционирование | Контроль проектной деятельности + ИИ-ассистент; демо-план VAX-B |
+| Пользователи | В сиде один `pm` (editor). Роль `viewer` (read-only) есть в коде и тестах, не создаётся `make seed` |
+| MCP | Web-чат вызывает `execute_tool` **in-process**; Cursor подключается к `mcp_server` по **stdio** (одна tool surface) |
+| LLM | По умолчанию **DeepSeek V4 Flash** (`LLM_PROVIDER=deepseek`); Timeweb / OpenAI — запасные |
+| README | На русском; English summary — раздел ниже |
+| Путь репозитория | `/path/to/AI-gantt` (плейсхолдер); живой стенд настраивается локально |
+| Пример Excel | Только `examples/plan_vax_b_demo.xlsx` |
+
+Актуальный запуск: [README.md](README.md). Путь к пилоту: [ROADMAP_TO_PRODUCTION.md](ROADMAP_TO_PRODUCTION.md). ADR: [docs/DECISIONS.md](docs/DECISIONS.md).
 
 ---
 
 ## English summary
 
-BioPlan is an internal web app: open the page → see a seeded hierarchical Gantt (pharma R&D plan) → edit the plan in bulk via a natural-language chat powered by an LLM that calls a real MCP server → changes appear on the diagram immediately (with change summary + bar highlight). Users can upload/export Excel, open a task modal, drag bars, undo up to 10 steps, and continue agent jobs after closing the tab (chat history + toast on return). Stack: React (Vite/TS), FastAPI, SQLite, MCP, DeepSeek V4 Flash (OpenAI-compatible fallback). Auth: login/password (seeded users). UI in Russian; README in RU + EN summary. This document is the single source of truth for scope, architecture, agent contract, demo script, and definition of done.
+BioPlan is an internal web app for **project control with an AI assistant**: open the page → see a seeded hierarchical Gantt → edit the plan in bulk via natural-language chat backed by an LLM that uses a shared MCP tool surface → changes appear on the diagram immediately (summary + bar highlight). Users can upload/export Excel, open a task modal, drag bars, undo up to 10 steps, and continue agent jobs after closing the tab. Stack: React (Vite/TS), FastAPI, SQLite, MCP, DeepSeek V4 Flash (Timeweb/OpenAI fallbacks). Auth: login/password (seeded `pm`). UI and README in Russian; this section is the EN summary. The body of this document is the original assignment scope; see **Статус сдачи** for what shipped.
 
 ---
 
@@ -208,7 +225,7 @@ BioPlan is an internal web app: open the page → see a seeded hierarchical Gant
 
 ### 5.3 Sample-файл
 
-`examples/plan_vax_b_demo.xlsx` — валидный импорт, немного отличается от сида (чтобы шаг 2 demo script был заметен). Legacy-имя `plan_biokad_demo.xlsx` — копия того же файла.
+`examples/plan_vax_b_demo.xlsx` — валидный импорт (может чуть отличаться от сида, чтобы шаг импорта в demo script был заметен).
 
 ---
 
@@ -236,21 +253,22 @@ FastAPI (auth, plans, excel, chat, jobs, undo)
 Структура репозитория:
 
 ```
-/var/CRM_test/
-  TECHNICAL_SPEC.md          ← этот документ
+/path/to/AI-gantt/
+  TECHNICAL_SPEC.md          ← этот документ (+ блок «Статус сдачи»)
   README.md
   ROADMAP_TO_PRODUCTION.md
   Makefile                   # make up | seed | test
   frontend/                  # React + Vite + TS + Tailwind
   backend/                   # FastAPI
-  mcp_server/                # отдельный MCP-процесс
+  mcp_server/                # MCP stdio для Cursor (web — in-process runtime)
   examples/
     plan_vax_b_demo.xlsx
-    plan_biokad_demo.xlsx          # legacy alias = копия VAX-B sample
   docs/
-    demo.gif                 # или demo.mp4
+    demo.gif
     RUNBOOK.md
-    adr/                     # или DECISIONS.md
+    DECISIONS.md
+    DEMO.md
+  deploy/                    # шаблоны systemd/nginx
   .env.example
 ```
 

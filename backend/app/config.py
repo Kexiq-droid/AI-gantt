@@ -15,14 +15,14 @@ class Settings(BaseSettings):
 
     secret_key: str = "dev-secret-change-me"
     database_url: str = f"sqlite:///{ROOT / 'data' / 'bioplan.db'}"
-    cors_origins: str = "http://localhost:5173,https://Bio.2alexs.ru"
+    cors_origins: str = "http://127.0.0.1:8100,http://localhost:8100,http://localhost:5173"
     cookie_secure: bool = False
     cookie_name: str = "bioplan_token"
     access_token_expire_minutes: int = 60 * 24 * 7
 
     demo_pm_password: str = "pm12345"
 
-    llm_provider: str = "timeweb"
+    llm_provider: str = "deepseek"
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"

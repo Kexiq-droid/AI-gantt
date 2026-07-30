@@ -14,12 +14,13 @@
 
 Ожидаемый health: `{"status":"ok","db":"ok","llm":"ok"}` (при настроенном ключе).
 
-## Каталоги (пример стенда)
+## Каталоги
 
-- Код: каталог клона (на стенде часто `/var/CRM_test`)
+- Код: `/path/to/AI-gantt` (абсолютный путь к клону)
 - БД: по умолчанию `<repo>/data/bioplan.db` (или `DATABASE_URL` из `.env`)
 - Статика: `<repo>/frontend/dist` (отдаёт FastAPI)
 - env: `<repo>/.env`
+- Шаблон systemd: `deploy/bioplan-api.service` (подставьте свой путь вместо `/path/to/AI-gantt`)
 
 ## Смена LLM
 
