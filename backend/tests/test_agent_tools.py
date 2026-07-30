@@ -22,7 +22,7 @@ def test_plan_commands_ok_stores_ops(db, mini_plan):
     assert changes == []
 
 
-def test_plan_commands_over_limit_clarifies(db, mini_plan):
+def test_plan_commands_over_limit_chunks_without_asking(db, mini_plan):
     _user, plan = mini_plan
     ctx: dict = {"require_plan": True}
     ops = [
@@ -30,10 +30,126 @@ def test_plan_commands_over_limit_clarifies(db, mini_plan):
     ]
     result, changes = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
     assert result["ok"] is False
-    assert result["need_clarification"] is True
+    assert result["need_chunking"] is True
+    assert result["need_clarification"] is False
     assert result["count"] == MAX_BATCH_OPS + 1
+    assert len(result["apply_now"]) == MAX_BATCH_OPS
+    assert len(result["remaining"]) == 1
     assert ctx.get("planned_ops") is None
     assert changes == []
+
+
+def test_plan_commands_allows_large_create_wbs(db, mini_plan):
+    _user, plan = mini_plan
+    ctx: dict = {"require_plan": True}
+    ops = [
+        {
+            "op": "create",
+            "code": f"T9.{i}",
+            "parent": "P2",
+            "title": f"Work {i}",
+            "duration_days": 2,
+            "predecessors": [f"T9.{i-1}"] if i > 1 else [],
+        }
+        for i in range(1, 8)
+    ]
+    result, changes = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
+    assert result["ok"] is True
+    assert result["plan_build"] is True
+    assert result["count"] == 7
+    assert ctx["planned_ops"] == ops
+    assert changes == []
+
+
+def test_plan_commands_create_needs_placement(db, mini_plan):
+    _user, plan = mini_plan
+    ctx: dict = {"require_plan": True}
+    ops = [{"op": "create", "code": "T2.9", "title": "Extra", "duration_days": 3}]
+    result, _ = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
+    assert result["ok"] is False
+    assert result["need_clarification"] is True
+    assert result["reason"] == "create_placement"
+    assert ctx.get("planned_ops") is None
+
+
+def test_plan_commands_create_ok_with_placement(db, mini_plan):
+    _user, plan = mini_plan
+    ctx: dict = {"require_plan": True}
+    ops = [
+        {
+            "op": "create",
+            "code": "T2.9",
+            "parent": "P2",
+            "after": "T2.1",
+            "title": "Extra",
+            "duration_days": 3,
+            "predecessors": ["T2.1"],
+        }
+    ]
+    result, _ = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
+    assert result["ok"] is True
+    assert ctx["planned_ops"] == ops
+
+
+def test_plan_commands_rejects_flat_wbs_without_cascade(db, mini_plan):
+    _user, plan = mini_plan
+    ctx: dict = {"require_plan": True}
+    ops = [
+        {
+            "op": "create",
+            "code": f"T8.{i}",
+            "parent": "P2",
+            "title": f"Flat {i}",
+            "duration_days": 2,
+            "predecessors": [],
+        }
+        for i in range(1, 5)
+    ]
+    result, _ = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
+    assert result["ok"] is False
+    assert result["reason"] == "cascade"
+
+
+def test_plan_commands_replace_needs_confirm(db, mini_plan):
+    _user, plan = mini_plan
+    ctx: dict = {"require_plan": True}
+    ops = [
+        {"op": "delete", "filter": {"all": True}},
+        {
+            "op": "create",
+            "code": "P1",
+            "parent": None,
+            "position": "end",
+            "title": "Phase",
+            "duration_days": 5,
+            "predecessors": [],
+        },
+        {
+            "op": "create",
+            "code": "T1.1",
+            "parent": "P1",
+            "position": "end",
+            "title": "A",
+            "duration_days": 2,
+            "predecessors": [],
+        },
+        {
+            "op": "create",
+            "code": "T1.2",
+            "parent": "P1",
+            "after": "T1.1",
+            "title": "B",
+            "duration_days": 2,
+            "predecessors": ["T1.1"],
+        },
+    ]
+    blocked, _ = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
+    assert blocked["need_confirmation"] is True
+    assert blocked.get("replace_plan") is True
+    ok, _ = _run_tool(
+        db, plan, "plan_commands", {"operations": ops, "confirmed": True}, ctx=ctx
+    )
+    assert ok["ok"] is True
 
 
 def test_apply_requires_plan_commands(db, mini_plan):

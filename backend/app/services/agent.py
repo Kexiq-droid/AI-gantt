@@ -13,8 +13,10 @@ from sqlalchemy.orm import Session
 from backend.app.config import get_settings
 from backend.app.models import AgentJob, ChatMessage, Plan
 from backend.app.services.mcp_runtime import (
+    CLARIFY_CREATE_PLACEMENT,
     CLARIFY_OVER_LIMIT,
     MAX_BATCH_OPS,
+    create_placement_issues,
     execute_tool,
     ops_limit_result,
 )
@@ -55,21 +57,50 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
 2) Проанализируй ВЕСЬ текст пользователя. Разложи на упорядоченный список команд.
 3) Вызови plan_commands с полным списком operations (все части составного запроса).
 4) Смотри ответ plan_commands:
-   - need_clarification=true (больше {MAX_BATCH_OPS} действий) → НЕ вызывай apply_plan_patch.
-     Ответь пользователю: перечисли понятые действия кратко и попроси выбрать не больше {MAX_BATCH_OPS}.
-   - ok=true → СРАЗУ вызови apply_plan_patch с ТЕМ ЖЕ списком operations (один batch, атомарно).
-5) После apply ответь кратко, что сделал (1–3 предложения) по факту changes.
+   - ok=true → СРАЗУ вызови apply_plan_patch с ТЕМ ЖЕ списком operations (весь список).
+   - need_chunking=true → НЕ спрашивай пользователя. apply_plan_patch(apply_now), затем
+     plan_commands(remaining) + apply, пока remaining не пуст.
+   - need_confirmation / replace_plan → спроси «Заменю текущий план целиком? да/нет».
+     После «да» — тот же operations с confirmed=true в plan_commands и apply_plan_patch.
+   - need_clarification + reason=create_placement → спроси parent / after|position / predecessors.
+   - need_clarification + reason=cascade → пересобери WBS со смешанным каскадом.
+5) После apply ответь по факту changes. Для нового плана — кратко: что последовательно, что параллельно.
+
+ДОБАВЛЕНИЕ ОДНОЙ / НЕСКОЛЬКИХ ЗАДАЧ (не весь план с нуля):
+- Если пользователь НЕ указал куда вставлять — НЕ вызывай apply. Спроси ВСЁ недостающее:
+  (1) parent / фаза, (2) позиция: after=код или position=end, (3) predecessors по технологии
+  (или явно «можно параллельно» → predecessors=[]).
+- Не спрашивай, если уже сказано («в P3», «после T2.1», «в конец фазы»), или это полный план
+  с нуля, или «как считаешь нужным» / «создавай всё».
+- В каждой create-операции обязательны поля: parent, after|position|sort_order, predecessors.
+
+СОЗДАНИЕ НОВОГО ПЛАНА («создай план…», ремонт, roadmap, с нуля и т.п.):
+- get_plan_snapshot. Если план не пуст — спроси ОДИН раз: заменить целиком? После «да» —
+  operations = [delete filter.all] + полный WBS, plan_commands(..., confirmed=true) и
+  apply_plan_patch(..., confirmed=true). Не спрашивай повторно.
+- Строй РЕАЛЬНЫЙ смешанный каскад (не чистый waterfall):
+  фазы P* + листовые T*.* с duration_days; критический путь — последовательно (predecessors);
+  независимые по технологии работы — параллельно (общий predecessor или []).
+  Анализируй технологию процесса (что блокирует что), не ресурсы.
+- Минимум 2–5 реальных задач на фазу. НЕ создавай пустые фазы без детей.
+- Весь WBS одним plan_commands + одним apply. Не дроби «по 3», не спрашивай «создать эти 3?».
+- В финальном ответе: 1–2 предложения «последовательно: … / параллельно: …».
+- Не пиши «готово, полный план», если на Ганте только фазы без листовых задач.
 
 ЗАПРЕЩЕНО:
 - Вызывать apply_plan_patch без предварительного plan_commands в этом же ходе.
-- Применять только первую часть составного запроса.
+- Применять только первую часть составного запроса (кроме явного чанкинга по need_chunking).
 - Писать «готово», если не было успешного apply_plan_patch / import_excel_attachment.
-- Задавать уточнения, если действий ≤ {MAX_BATCH_OPS} и смысл однозначен —
-  ИСКЛЮЧЕНИЕ: массовое удаление (см. ниже) — всегда сначала спроси подтверждение.
-- Удалять всё / много задач без явного «да»/«подтверждаю» от пользователя в следующем сообщении.
+- Спрашивать «создать эти 3?» / дробить создание плана по лимиту 3, если пользователь уже
+  попросил создать план или сказал «все» / «создавай».
+- Создавать одиночную задачу без уточнения места, если parent/позиция/deps не заданы.
+- Задавать лишние уточнения, если смысл однозначен —
+  ИСКЛЮЧЕНИЕ: массовое удаление / замена плана — сначала «да».
+- Удалять всё без явного «да»/«подтверждаю» в следующем сообщении.
 
 ДОПУСТИМО:
-- Короткие «да» / «меняй» / «ок» — подтверждение предыдущего user-запроса из истории; разложи его через plan_commands и примени (для массового удаления — apply с confirmed=true только после «да»).
+- Короткие «да» / «меняй» / «ок» / «создавай» / «все» / «продолжай» — подтверждение продолжить;
+  (массовое удаление / замена плана — confirmed=true только после «да»).
 - Импорт прикреплённого Excel → import_excel_attachment (без plan_commands/apply_plan_patch).
 - Только анализ («кто перегружен?») → snapshot, без plan_commands.
 - «Удали все / очисти план» → НЕ вызывай apply. Ответь предупреждением и попроси «да» или «нет».
@@ -97,7 +128,9 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
 - {{"op":"reassign","filter":{{"codes":["T2.1","T2.2"]}},"assignee":"Смирнов"}}
 - {{"op":"update","code":"P1","duration_days":12}}
 - {{"op":"update","code":"T2.1","progress_pct":60}}
-- {{"op":"create","code":"T2.9","parent":"P2","title":"...","duration_days":5,"predecessors":["T2.3"]}}
+- {{"op":"create","code":"T2.9","parent":"P2","after":"T2.3","title":"...","duration_days":5,"predecessors":["T2.3"]}}
+- {{"op":"create","code":"T2.10","parent":"P2","position":"end","title":"...","duration_days":4,"predecessors":[]}}
+- {{"op":"create","code":"P1","parent":null,"position":"end","title":"Фаза","duration_days":10,"predecessors":[]}}
 - {{"op":"set_deps","code":"T3.1","predecessors":["T2.4"]}}
 - {{"op":"delete","code":"T4.3"}}
 - {{"op":"delete","filter":{{"all":true}}}}
@@ -137,7 +170,8 @@ FEW_SHOT = [
 
 _CONFIRM_RE = re.compile(
     r"^(да|ок|окей|хорошо|конечно|сделай|делай|меняй|давай|подтверждаю|"
-    r"да[,!. ]*(меняй|сделай|давай)|меняй[,!. ]*|давай[,!. ]*)+$",
+    r"создавай|продолжай|все|всё|создавай\s+все|создавай\s+всё|"
+    r"да[,!. ]*(меняй|сделай|давай|создавай)|меняй[,!. ]*|давай[,!. ]*)+$",
     re.IGNORECASE,
 )
 
@@ -464,15 +498,26 @@ def _parse_create(db: Session, plan: Plan, text: str) -> dict[str, Any] | None:
     if not title:
         title = code
 
-    return {
+    op: dict[str, Any] = {
         "op": "create",
         "code": code,
         "parent": parent,
         "title": title,
         "duration_days": dur,
         "assignee": assignee,
-        "predecessors": predecessors,
     }
+    if predecessors:
+        op["predecessors"] = predecessors
+        op["after"] = predecessors[0]
+    elif re.search(r"параллельн|без\s+зависимост", raw, re.IGNORECASE):
+        op["predecessors"] = []
+    if re.search(r"в\s+конец", raw, re.IGNORECASE):
+        op["position"] = "end"
+    elif re.search(r"в\s+начал", raw, re.IGNORECASE):
+        op["position"] = "start"
+    elif "after" not in op and "position" not in op and predecessors:
+        op["after"] = predecessors[0]
+    return op
 
 
 def _parse_swap_codes(text: str) -> tuple[str, str] | None:
@@ -933,13 +978,32 @@ def _try_rule_mutations(
     for clause in clauses:
         if not re.search(r"(добав\w*|созда\w*|нужна\s+новая\s+задач)", clause, re.I):
             continue
+        # Полный план с нуля / «как считаешь» — не rules-create, пусть LLM
+        if re.search(
+            r"(план\s+с\s+нуля|создай\s+план|как\s+считаешь|создавай\s+вс[её])",
+            clause,
+            re.I,
+        ):
+            continue
         create_op = _parse_create(db, plan, clause)
-        if create_op:
-            operations.append(create_op)
-            bits.append(
-                f"Добавил задачу {create_op['code']} «{create_op['title']}» "
-                f"в {create_op['parent']} ({create_op['duration_days']} дн.)"
+        if not create_op or create_placement_issues([create_op]):
+            job.provider = "rules"
+            job.model = "clarify_create"
+            _finish_direct(
+                db,
+                job,
+                plan,
+                summary=CLARIFY_CREATE_PLACEMENT,
+                changes=[],
+                ok=True,
+                meta_extra={"awaiting_confirm": "create_placement"},
             )
+            return True
+        operations.append(create_op)
+        bits.append(
+            f"Добавил задачу {create_op['code']} «{create_op['title']}» "
+            f"в {create_op['parent']} ({create_op['duration_days']} дн.)"
+        )
 
     shifts = _parse_all_shifts(raw_text, default_code=default_code)
     for shift in shifts:
@@ -1044,11 +1108,14 @@ TOOLS = [
         "function": {
             "name": "plan_commands",
             "description": (
-                "Шаг анализа: разложить ВЕСЬ запрос пользователя на упорядоченный список "
-                f"operations БЕЗ применения к плану. Обязателен перед apply_plan_patch. "
-                f"Если операций больше {MAX_BATCH_OPS} — вернёт need_clarification. "
-                'Сдвиг всего плана («все задачи») = ОДНА операция '
-                '{"op":"shift","filter":{"all":true},"days":N}, не по фазам.'
+                "Шаг анализа: разложить ВЕСЬ запрос на operations БЕЗ применения. "
+                "Обязателен перед apply_plan_patch. "
+                "Одиночный create: нужны parent + after|position + predecessors "
+                "(иначе need_clarification create_placement). "
+                "Сборка плана create+set_deps+update — большой список со смешанным каскадом. "
+                "Замена плана: [delete all]+WBS с confirmed=true после «да» пользователя. "
+                f"Прочие правки >{MAX_BATCH_OPS}: need_chunking (apply_now/remaining). "
+                'Сдвиг всего плана = одна shift filter.all.'
             ),
             "parameters": {
                 "type": "object",
@@ -1062,6 +1129,13 @@ TOOLS = [
                         "description": "Упорядоченный список операций для apply_plan_patch",
                         "items": {"type": "object"},
                     },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": (
+                            "true после «да» на замену/очистку плана "
+                            "(delete all + новый WBS или mass delete)"
+                        ),
+                    },
                 },
                 "required": ["operations"],
             },
@@ -1072,11 +1146,10 @@ TOOLS = [
         "function": {
             "name": "apply_plan_patch",
             "description": (
-                f"Применить batch-патч атомарно. Максимум {MAX_BATCH_OPS} operations. "
-                "Вызывай только после успешного plan_commands с тем же списком. "
-                "dry_run=true — только превью changes без записи в план. "
-                "Массовое удаление (delete filter.all / clear): только после «да» пользователя, "
-                "с confirmed=true."
+                "Применить патч атомарно. Для сборки плана — весь список из plan_commands. "
+                f"Прочие правки: лимит {MAX_BATCH_OPS}; при need_chunking бери apply_now. "
+                "dry_run=true — превью. "
+                "Массовое удаление / замена плана: только после «да», confirmed=true."
             ),
             "parameters": {
                 "type": "object",
@@ -1092,7 +1165,7 @@ TOOLS = [
                     "confirmed": {
                         "type": "boolean",
                         "description": (
-                            "true только если пользователь явно подтвердил массовое удаление"
+                            "true если пользователь подтвердил массовое удаление или замену плана"
                         ),
                     },
                 },
@@ -1457,7 +1530,7 @@ def run_agent_job(db: Session, job_id: int) -> None:
 
     try:
         final_text = ""
-        for _ in range(8):
+        for _ in range(16):
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -1541,6 +1614,11 @@ def run_agent_job(db: Session, job_id: int) -> None:
         if not final_text:
             if tool_ctx.get("need_clarification"):
                 final_text = CLARIFY_OVER_LIMIT
+            elif tool_ctx.get("need_chunking") and not all_changes:
+                final_text = (
+                    "План большой — продолжаю чанками. Напишите «продолжай», "
+                    "если следующий шаг не применился."
+                )
             elif all_changes:
                 final_text = f"Готово. Изменены задачи: {', '.join(sorted(set(all_changes)))}."
             else:

@@ -240,8 +240,14 @@ def test_ops_limit_requires_clarification():
     assert ok is None
     over = _ops_limit_result([{"op": "shift"}] * (MAX_BATCH_OPS + 1))
     assert over is not None
-    assert over["need_clarification"] is True
+    assert over["need_chunking"] is True
+    assert over["need_clarification"] is False
     assert over["count"] == MAX_BATCH_OPS + 1
+    creates = [
+        {"op": "create", "code": f"T8.{i}", "title": f"t{i}", "duration_days": 1}
+        for i in range(1, 10)
+    ]
+    assert _ops_limit_result(creates) is None
 
 
 def test_multi_shift_and_multi_reassign_patch():

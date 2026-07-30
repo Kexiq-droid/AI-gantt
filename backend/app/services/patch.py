@@ -80,6 +80,23 @@ def apply_plan_patch_dict(
                 code = op["code"]
                 if code in by_code:
                     raise ValueError(f"Код {code} уже существует")
+                sort_order = op.get("sort_order")
+                after = op.get("after") or op.get("insert_after") or op.get("sort_after")
+                position = str(op.get("position") or "").strip().lower()
+                if sort_order is None and after:
+                    anchor = by_code.get(str(after))
+                    if not anchor:
+                        raise ValueError(f"create {code}: after={after} не найден в плане")
+                    sort_order = int(anchor.get("sort_order") or 0) + 1
+                    for t in tasks:
+                        if int(t.get("sort_order") or 0) >= sort_order:
+                            t["sort_order"] = int(t.get("sort_order") or 0) + 1
+                elif sort_order is None and position in ("start", "начало"):
+                    min_so = min((int(t.get("sort_order") or 0) for t in tasks), default=1)
+                    sort_order = min_so - 1
+                elif sort_order is None:
+                    # position end / default — в конец
+                    sort_order = max((int(t.get("sort_order") or 0) for t in tasks), default=0) + 1
                 row = {
                     "code": code,
                     "parent": op.get("parent"),
@@ -90,7 +107,7 @@ def apply_plan_patch_dict(
                     "start_date": op.get("start_date")
                     or working.get("start_date")
                     or date.today().isoformat(),
-                    "sort_order": int(op.get("sort_order") or (max((t["sort_order"] for t in tasks), default=0) + 1)),
+                    "sort_order": int(sort_order),
                     "progress_pct": max(0, min(100, int(op.get("progress_pct") or 0))),
                     "last_changed_by": changed_by,
                     "predecessors": list(op.get("predecessors") or []),

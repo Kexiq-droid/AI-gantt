@@ -236,6 +236,30 @@ def test_create_task():
     assert any(t["code"] == "T1.2" for t in new_plan["tasks"])
 
 
+def test_create_task_after_sets_sort_order():
+    plan = _base_plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan,
+        {
+            "operations": [
+                {
+                    "op": "create",
+                    "code": "T1.2",
+                    "parent": "P1",
+                    "after": "T1.1",
+                    "title": "After leaf",
+                    "duration_days": 2,
+                    "predecessors": ["T1.1"],
+                }
+            ]
+        },
+    )
+    assert not errors
+    assert "T1.2" in changes
+    by = {t["code"]: t for t in new_plan["tasks"]}
+    assert by["T1.2"]["sort_order"] == by["T1.1"]["sort_order"] + 1
+
+
 def test_set_deps():
     plan = _base_plan()
     new_plan, changes, errors = apply_plan_patch_dict(

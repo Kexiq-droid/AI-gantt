@@ -23,16 +23,55 @@ from backend.app.services.plan_store import (
 from backend.app.services.validate import validate_plan_dict
 
 MAX_BATCH_OPS = 3
+# Полный WBS (create + deps) часто >3 ops — пропускаем soft-лимит до этого потолка.
+MAX_PLAN_BUILD_OPS = 60
+_PLAN_BUILD_KINDS = frozenset({"create", "set_deps", "update"})
 
 CLARIFY_OVER_LIMIT = (
     "В запросе больше 3 отдельных действий. Уточните, какие 1–3 выполнить сейчас "
     "(остальные сделаем следующим сообщением)."
 )
 
+CHUNK_OVER_LIMIT = (
+    "Операций больше лимита batch. НЕ спрашивай пользователя. "
+    "Сразу вызови apply_plan_patch с полем apply_now из ответа, затем снова "
+    "plan_commands с remaining и apply — пока remaining не пуст. "
+    "В конце одним сообщением резюмируй всё сделанное."
+)
+
 MASS_DELETE_NEED_CONFIRM = (
     "Массовое удаление требует явного подтверждения пользователя в чате "
     "(«да» / «подтверждаю» после предупреждения). Не применяйте патч без подтверждения."
 )
+
+CLARIFY_CREATE_PLACEMENT = (
+    "Не хватает данных, куда вставить новую задачу. НЕ применяй патч. "
+    "Спроси пользователя коротко: "
+    "(1) parent / фаза, "
+    "(2) позиция среди siblings — after=код или position=end, "
+    "(3) predecessors по технологии работ (или [] если можно параллельно). "
+    "Исключения: полный план с нуля; пользователь уже указал эти поля; "
+    "«как считаешь нужным» / «создавай всё»."
+)
+
+CLARIFY_CASCADE = (
+    "План собран без каскада: у листовых задач нет технологических зависимостей. "
+    "НЕ применяй патч. Пересобери WBS: критический путь последовательно (predecessors), "
+    "независимые работы — параллельно (общий predecessor или []). "
+    "В ответе пользователю кратко укажи, что идёт последовательно, а что параллельно."
+)
+
+REPLACE_PLAN_NEED_CONFIRM = (
+    "В плане уже есть задачи, а operations содержат очистку + новый WBS. "
+    "НЕ применяй патч. Спроси: «Заменю текущий план целиком? Напишите да / нет.» "
+    "После «да» — тот же список operations в plan_commands и apply_plan_patch с confirmed=true."
+)
+
+
+def _op_kind(op: Any) -> str:
+    if not isinstance(op, dict):
+        return ""
+    return str(op.get("op") or op.get("type") or "").strip().lower()
 
 
 def _is_mass_delete_ops(operations: list[Any]) -> bool:
@@ -41,19 +80,139 @@ def _is_mass_delete_ops(operations: list[Any]) -> bool:
     for op in ops:
         if not isinstance(op, dict):
             continue
-        kind = op.get("op") or op.get("type")
+        kind = _op_kind(op)
         if kind == "clear":
             return True
         if kind == "delete" and (
             op.get("all") is True or (op.get("filter") or {}).get("all") is True
         ):
             return True
-    deletes = [
-        op
-        for op in ops
-        if isinstance(op, dict) and (op.get("op") or op.get("type")) == "delete"
-    ]
+    deletes = [op for op in ops if _op_kind(op) == "delete"]
     return len(deletes) >= 2
+
+
+def _is_plan_build_ops(operations: list[Any]) -> bool:
+    """Multi-create WBS build — large batch + cascade rules (not a single ad-hoc create)."""
+    ops = [op for op in (operations or []) if isinstance(op, dict)]
+    # Allow leading mass-delete when replacing a plan in one batch.
+    ops = [op for op in ops if not (_op_kind(op) == "delete" and _is_mass_delete_ops([op]))]
+    if not ops:
+        return False
+    kinds = {_op_kind(op) for op in ops}
+    if not (kinds and kinds <= _PLAN_BUILD_KINDS and "create" in kinds):
+        return False
+    creates = [op for op in ops if _op_kind(op) == "create"]
+    phases = [
+        op
+        for op in creates
+        if not op.get("parent") and _is_phase_code(op.get("code"))
+    ]
+    leaves = [op for op in creates if op.get("parent")]
+    # Целый план или заметный кусок WBS; одиночный create — не build.
+    return len(creates) >= 3 or (bool(phases) and bool(leaves))
+
+
+def _is_phase_code(code: Any) -> bool:
+    s = str(code or "").strip()
+    return bool(s) and s[0] in "Pp" and s[1:].isdigit()
+
+
+def _create_has_parent(op: dict[str, Any]) -> bool:
+    if "parent" not in op:
+        return False
+    parent = op.get("parent")
+    if parent is None or parent == "":
+        # Top-level phase only.
+        return _is_phase_code(op.get("code"))
+    return True
+
+
+def _create_has_position(op: dict[str, Any]) -> bool:
+    if op.get("after") or op.get("insert_after") or op.get("sort_after"):
+        return True
+    if "sort_order" in op:
+        return True
+    pos = str(op.get("position") or "").strip().lower()
+    return pos in ("end", "start", "конец", "начало")
+
+
+def _create_has_deps_field(op: dict[str, Any]) -> bool:
+    return "predecessors" in op
+
+
+def create_placement_issues(operations: list[Any]) -> list[dict[str, Any]]:
+    """Ad-hoc create ops missing parent / position / predecessors."""
+    issues: list[dict[str, Any]] = []
+    for op in operations or []:
+        if not isinstance(op, dict) or _op_kind(op) != "create":
+            continue
+        missing: list[str] = []
+        if not _create_has_parent(op):
+            missing.append("parent")
+        if not _create_has_position(op):
+            missing.append("position|after")
+        if not _create_has_deps_field(op):
+            missing.append("predecessors")
+        if missing:
+            issues.append({"code": op.get("code"), "title": op.get("title"), "missing": missing})
+    return issues
+
+
+def plan_build_cascade_issues(operations: list[Any]) -> list[str]:
+    """Require mixed cascade: some sequential deps among leaf creates."""
+    creates = [
+        op for op in (operations or []) if isinstance(op, dict) and _op_kind(op) == "create"
+    ]
+    leaves = [op for op in creates if op.get("parent")]
+    if len(leaves) < 2:
+        return []
+    with_deps = [op for op in leaves if list(op.get("predecessors") or [])]
+    if not with_deps:
+        return [
+            "У листовых задач нет predecessors — нужен смешанный каскад "
+            "(последовательные работы + параллельные где технология позволяет)."
+        ]
+    return []
+
+
+def create_ops_gate_result(operations: list[Any]) -> dict[str, Any] | None:
+    """Block incomplete ad-hoc creates or non-cascading plan builds."""
+    ops = [op for op in (operations or []) if isinstance(op, dict)]
+    if not any(_op_kind(op) == "create" for op in ops):
+        return None
+
+    # Replace batch: delete-all + creates — treat as plan build after delete.
+    non_delete = [op for op in ops if _op_kind(op) != "delete"]
+    build = _is_plan_build_ops(ops) or (
+        _is_plan_build_ops(non_delete) and _is_mass_delete_ops(ops)
+    )
+
+    if build:
+        cascade = plan_build_cascade_issues(non_delete if non_delete else ops)
+        if cascade:
+            return {
+                "ok": False,
+                "need_clarification": True,
+                "need_chunking": False,
+                "reason": "cascade",
+                "message": CLARIFY_CASCADE,
+                "errors": cascade,
+                "operations_preview": ops[:8],
+            }
+        return None
+
+    issues = create_placement_issues(ops)
+    if not issues:
+        return None
+    return {
+        "ok": False,
+        "need_clarification": True,
+        "need_chunking": False,
+        "reason": "create_placement",
+        "message": CLARIFY_CREATE_PLACEMENT,
+        "issues": issues,
+        "operations_preview": ops[:8],
+    }
 
 
 # Exported over MCP stdio (Cursor). Chat may also use chat-only tools below.
@@ -69,17 +228,38 @@ MCP_PUBLIC_TOOLS = frozenset(
 
 
 def ops_limit_result(operations: list[Any]) -> dict[str, Any] | None:
-    """If over limit, return clarification payload; else None."""
-    n = len(operations or [])
+    """If over limit, return chunking/clarification payload; else None (allow)."""
+    ops = list(operations or [])
+    n = len(ops)
     if n <= MAX_BATCH_OPS:
         return None
+    # Полный план с задачами/зависимостями — один атомарный apply.
+    if _is_plan_build_ops(ops) and n <= MAX_PLAN_BUILD_OPS:
+        return None
+    if _is_plan_build_ops(ops) and n > MAX_PLAN_BUILD_OPS:
+        return {
+            "ok": False,
+            "need_clarification": True,
+            "need_chunking": False,
+            "count": n,
+            "max": MAX_PLAN_BUILD_OPS,
+            "message": (
+                f"Слишком большой план ({n} операций, максимум {MAX_PLAN_BUILD_OPS}). "
+                "Сократи WBS или разбей на два запроса (сначала фазы 1–N с задачами)."
+            ),
+            "operations_preview": ops[:8],
+        }
+    # Прочие правки >3: чанки без вопроса пользователю (не блокируем «создай всё»).
     return {
         "ok": False,
-        "need_clarification": True,
+        "need_clarification": False,
+        "need_chunking": True,
         "count": n,
         "max": MAX_BATCH_OPS,
-        "message": CLARIFY_OVER_LIMIT,
-        "operations_preview": operations[:8],
+        "message": CHUNK_OVER_LIMIT,
+        "apply_now": ops[:MAX_BATCH_OPS],
+        "remaining": ops[MAX_BATCH_OPS:],
+        "operations_preview": ops[:8],
     }
 
 
@@ -156,51 +336,91 @@ def execute_tool(
         operations = args.get("operations") or []
         if not isinstance(operations, list):
             return {"ok": False, "errors": ["operations must be an array"]}, []
+        confirmed = bool(args.get("confirmed"))
+        has_creates = any(
+            isinstance(op, dict) and _op_kind(op) == "create" for op in operations
+        )
         if _is_mass_delete_ops(operations):
+            if has_creates:
+                if not confirmed:
+                    ctx["planned_ops"] = None
+                    ctx["need_clarification"] = True
+                    return {
+                        "ok": False,
+                        "need_confirmation": True,
+                        "replace_plan": True,
+                        "count": len(operations),
+                        "message": REPLACE_PLAN_NEED_CONFIRM,
+                        "operations_preview": operations[:8],
+                    }, []
+                # confirmed replace: fall through to gates / limit
+            else:
+                ctx["planned_ops"] = None
+                ctx["need_clarification"] = True
+                return {
+                    "ok": False,
+                    "need_confirmation": True,
+                    "count": len(operations),
+                    "message": (
+                        "Массовое удаление: не применяй патч. Ответь пользователю "
+                        "предупреждением и попроси «да»/«нет». После «да» — одна операция "
+                        'delete filter.all=true с confirmed=true.'
+                    ),
+                    "operations_preview": operations[:8],
+                }, []
+        gated = create_ops_gate_result(operations)
+        if gated:
             ctx["planned_ops"] = None
             ctx["need_clarification"] = True
-            return {
-                "ok": False,
-                "need_confirmation": True,
-                "count": len(operations),
-                "message": (
-                    "Массовое удаление: не применяй патч. Ответь пользователю "
-                    "предупреждением и попроси «да»/«нет». После «да» — одна операция "
-                    'delete filter.all=true с confirmed=true.'
-                ),
-                "operations_preview": operations[:8],
-            }, []
+            ctx["need_chunking"] = False
+            return gated, []
         limited = ops_limit_result(operations)
         if limited:
             ctx["planned_ops"] = None
-            ctx["need_clarification"] = True
+            ctx["need_clarification"] = bool(limited.get("need_clarification"))
+            ctx["need_chunking"] = bool(limited.get("need_chunking"))
             return limited, []
         ctx["planned_ops"] = operations
         ctx["need_clarification"] = False
+        ctx["need_chunking"] = False
+        build = _is_plan_build_ops(operations)
         return {
             "ok": True,
             "need_clarification": False,
+            "need_chunking": False,
             "count": len(operations),
-            "max": MAX_BATCH_OPS,
+            "max": MAX_PLAN_BUILD_OPS if build else MAX_BATCH_OPS,
+            "plan_build": build,
             "analysis": (args.get("analysis") or "")[:500],
             "operations": operations,
-            "next": "Вызови apply_plan_patch с этим же списком operations.",
+            "next": "Вызови apply_plan_patch с этим же списком operations (весь список).",
         }, []
 
     if name == "apply_plan_patch":
         operations = args.get("operations") or []
         dry_run = bool(args.get("dry_run"))
         confirmed = bool(args.get("confirmed"))
+        gated = create_ops_gate_result(operations)
+        if gated:
+            ctx["need_clarification"] = True
+            ctx["need_chunking"] = False
+            return gated, []
         limited = ops_limit_result(operations)
         if limited:
-            ctx["need_clarification"] = True
+            ctx["need_clarification"] = bool(limited.get("need_clarification"))
+            ctx["need_chunking"] = bool(limited.get("need_chunking"))
             return limited, []
         if _is_mass_delete_ops(operations) and not confirmed and not dry_run:
+            has_creates = any(
+                isinstance(op, dict) and _op_kind(op) == "create" for op in operations
+            )
+            msg = REPLACE_PLAN_NEED_CONFIRM if has_creates else MASS_DELETE_NEED_CONFIRM
             return {
                 "ok": False,
                 "need_confirmation": True,
-                "errors": [MASS_DELETE_NEED_CONFIRM],
-                "message": MASS_DELETE_NEED_CONFIRM,
+                "replace_plan": has_creates,
+                "errors": [msg],
+                "message": msg,
             }, []
         if ctx.get("require_plan") and ctx.get("planned_ops") is None and not dry_run:
             return {
