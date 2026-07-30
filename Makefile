@@ -1,4 +1,4 @@
-.PHONY: up seed test build frontend-install backend-install
+.PHONY: up seed test test-backend test-frontend build frontend-install backend-install
 
 VENV=.venv/bin
 export PYTHONPATH := $(CURDIR)
@@ -20,5 +20,10 @@ backend-install:
 seed:
 	$(VENV)/python -m backend.app.seed_cli
 
-test:
+test-backend:
 	$(VENV)/pytest -q backend/tests
+
+test-frontend: frontend-install
+	cd frontend && npm test
+
+test: test-backend test-frontend

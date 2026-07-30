@@ -166,7 +166,9 @@ Web-чат и Cursor используют одну tool surface (`backend/app/se
 | `make seed` | пользователь `pm` + демо-план |
 | `make build` | сборка frontend |
 | `make up` | build + uvicorn :8100 |
-| `make test` | pytest |
+| `make test` | pytest (backend) + Vitest (frontend) |
+| `make test-backend` | только pytest |
+| `make test-frontend` | только Vitest |
 
 ## Примеры команд ассистенту
 
