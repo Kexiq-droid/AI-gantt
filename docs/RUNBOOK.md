@@ -1,4 +1,6 @@
-# Runbook — BioPlan
+# Runbook — BioPlan (Ubuntu-сервер)
+
+Локальный запуск на Windows / Linux без systemd — в [README.md](../README.md). Ниже — эксплуатация стенда на Ubuntu.
 
 ## Сервисы
 
@@ -10,44 +12,45 @@
 | nginx | `nginx -t && systemctl reload nginx` |
 | Health | `curl -s http://127.0.0.1:8100/api/health` |
 
-## Каталоги
+Ожидаемый health: `{"status":"ok","db":"ok","llm":"ok"}` (при настроенном ключе).
 
-- Код: `/var/CRM_test`
-- БД: путь из `DATABASE_URL` (по умолчанию `/var/CRM_test/data/bioplan.db`)
-- Статика: `/var/CRM_test/frontend/dist` (отдаёт FastAPI)
-- env: `/var/CRM_test/.env`
+## Каталоги (пример стенда)
+
+- Код: каталог клона (на стенде часто `/var/CRM_test`)
+- БД: по умолчанию `<repo>/data/bioplan.db` (или `DATABASE_URL` из `.env`)
+- Статика: `<repo>/frontend/dist` (отдаёт FastAPI)
+- env: `<repo>/.env`
 
 ## Смена LLM
 
-1. Править `.env`: `LLM_PROVIDER`, ключи, модель.
-2. `systemctl restart bioplan-api`
+1. В `.env`: `LLM_PROVIDER=deepseek` (или `timeweb` / `openai`) и ключ.
+2. `systemctl restart bioplan-api` (или перезапуск uvicorn).
 3. Проверить `"llm":"ok"` в `/api/health`.
 
-## Очистка плана
+Для задач ассистента достаточно **DeepSeek V4 Flash**.
+
+## Сброс демо-плана
 
 ```bash
-cd /var/CRM_test && . .venv/bin/activate && PYTHONPATH=/var/CRM_test make seed
-# или кнопка «Очистить план» в UI (пустой проект)
+cd /path/to/AI-gantt && . .venv/bin/activate && make seed
+# или в UI: «Сбросить демо»
 ```
 
-## TLS / DNS
+Восстанавливает пользователя `pm` и план VAX-B, очищает чат/журнал.
 
-A-запись `bio.2alexs.ru` → `186.246.30.20`.  
-Сертификат Let's Encrypt: `/etc/letsencrypt/live/bio.2alexs.ru/` (автопродление через certbot timer).
+## TLS / DNS (публичный стенд)
 
-Перевыпуск при необходимости:
+Если есть домен (пример: `bio.2alexs.ru`):
 
-```bash
-certbot certonly --webroot -w /var/lib/letsencrypt -d bio.2alexs.ru \
-  --account b9b7f688b6a806a1941007d73c6e4784
-systemctl reload nginx
-```
+- A-запись → IP сервера
+- сертификат Let's Encrypt + nginx → `127.0.0.1:8100`
+- в `.env`: `COOKIE_SECURE=true`, `CORS_ORIGINS=https://ваш.домен`
 
 ## Типичные сбои
 
 | Симптом | Действие |
 |---------|----------|
-| Чат: ассистент недоступен | Нет ключа / `llm: degraded` — добавить ключ |
-| 401 после логина | `COOKIE_SECURE=true` требует HTTPS |
-| Пустой план | ожидаемо после `make seed` / «Очистить план»; импорт Excel или создание задач |
-| nginx 404 на HTTPS без SNI | Открывать по имени хоста из сертификата |
+| Чат: ассистент недоступен | Нет ключа / `llm: degraded` — добавить `DEEPSEEK_API_KEY` (или Timeweb) |
+| 401 после логина по HTTP | `COOKIE_SECURE=true` на HTTP — поставьте `false` локально |
+| Пустой / «чужой» план | `make seed` или «Сбросить демо» |
+| nginx 404 на HTTPS | открывать по имени из сертификата (SNI) |

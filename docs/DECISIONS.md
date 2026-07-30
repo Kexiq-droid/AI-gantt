@@ -22,7 +22,7 @@
 
 **Decision:** SQLite файл + `asyncio` background tasks в uvicorn, состояние job в таблице `agent_jobs`.
 
-**Consequences:** Не переживает multi-worker и рестарты mid-job надёжно. В Roadmap — очередь и Postgres.
+**Consequences:** Не переживает multi-worker и рестарты mid-job надёжно. Закрытие — в [ROADMAP_TO_PRODUCTION.md](../ROADMAP_TO_PRODUCTION.md) раздел **Now** (Postgres + очередь/worker).
 
 ## ADR-004: Shared MCP tool runtime (in-process + stdio)
 
