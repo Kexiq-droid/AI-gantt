@@ -201,6 +201,11 @@ MASS_DELETE_CONFIRM_TEXT = (
     "Напишите **да** / **подтверждаю** — или **нет**, чтобы отменить."
 )
 
+REPLACE_PLAN_CONFIRM_TEXT = (
+    "В плане уже **{n}** задач. Заменю текущий план целиком новым?\n"
+    "Напишите **да** — очищу и создам заново. Или **нет**, чтобы оставить как есть."
+)
+
 FULL_PLAN_RE = re.compile(
     r"(?:созда\w*|построй|собери|сгенерир\w*).{0,80}план|"
     r"план\s+(?:ремонт|проект|работ|квартир)|"
@@ -1528,6 +1533,24 @@ def run_agent_job(db: Session, job_id: int) -> None:
 
     # Known mutating phrases (shift all / phase / reassign / …) — без LLM
     if _rules_fallback():
+        return
+
+    # Непустой план + «создай план…» → фиксированный вопрос о замене (не LLM-болтовня).
+    from backend.app.services.plan_store import plan_to_dict as _plan_snap
+
+    _n_now = len((_plan_snap(db, plan).get("tasks") or []))
+    if _n_now > 0 and FULL_PLAN_RE.search(raw_text or ""):
+        job.provider = "rules"
+        job.model = "confirm_replace_plan"
+        _finish_direct(
+            db,
+            job,
+            plan,
+            summary=REPLACE_PLAN_CONFIRM_TEXT.format(n=_n_now),
+            changes=[],
+            ok=True,
+            meta_extra={"awaiting_confirm": "replace_plan"},
+        )
         return
 
     client_info = _client()

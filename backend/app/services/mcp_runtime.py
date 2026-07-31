@@ -328,7 +328,9 @@ def execute_tool(
         )
         if _is_mass_delete_ops(operations):
             if has_creates:
-                if not confirmed:
+                # План уже пуст (очистили на «да») — не требуем повторного confirm.
+                current_n = len((plan_to_dict(db, plan).get("tasks") or []))
+                if not confirmed and current_n > 0:
                     ctx["planned_ops"] = None
                     ctx["need_clarification"] = True
                     return {
@@ -339,7 +341,7 @@ def execute_tool(
                         "message": REPLACE_PLAN_NEED_CONFIRM,
                         "operations_preview": operations[:8],
                     }, []
-                # confirmed replace: fall through to gates / limit
+                # confirmed or empty plan: fall through to gates / limit
             else:
                 ctx["planned_ops"] = None
                 ctx["need_clarification"] = True
@@ -400,14 +402,19 @@ def execute_tool(
             has_creates = any(
                 isinstance(op, dict) and _op_kind(op) == "create" for op in operations
             )
-            msg = REPLACE_PLAN_NEED_CONFIRM if has_creates else MASS_DELETE_NEED_CONFIRM
-            return {
-                "ok": False,
-                "need_confirmation": True,
-                "replace_plan": has_creates,
-                "errors": [msg],
-                "message": msg,
-            }, []
+            current_n = len((plan_to_dict(db, plan).get("tasks") or []))
+            # delete+WBS на уже пустом плане — просто сборка, не «замена»
+            if has_creates and current_n == 0:
+                pass
+            else:
+                msg = REPLACE_PLAN_NEED_CONFIRM if has_creates else MASS_DELETE_NEED_CONFIRM
+                return {
+                    "ok": False,
+                    "need_confirmation": True,
+                    "replace_plan": has_creates,
+                    "errors": [msg],
+                    "message": msg,
+                }, []
         if ctx.get("require_plan") and ctx.get("planned_ops") is None and not dry_run:
             return {
                 "ok": False,
