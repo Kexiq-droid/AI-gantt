@@ -201,6 +201,16 @@ MASS_DELETE_CONFIRM_TEXT = (
     "Напишите **да** / **подтверждаю** — или **нет**, чтобы отменить."
 )
 
+FULL_PLAN_RE = re.compile(
+    r"(?:созда\w*|построй|собери|сгенерир\w*).{0,80}план|"
+    r"план\s+(?:ремонт|проект|работ|квартир)|"
+    r"ремонт\s+квартир|"
+    r"план\s+с\s+нуля|"
+    r"как\s+считаешь|"
+    r"создавай\s+вс[её]",
+    re.IGNORECASE | re.DOTALL,
+)
+
 _SWAP_PATTERNS = [
     re.compile(
         r"(?:поменяй|поменять|поменяйте|переставь|переставить|swap)\s+"
@@ -973,37 +983,37 @@ def _try_rule_mutations(
     operations: list[dict[str, Any]] = []
     bits: list[str] = []
 
-    # Create: parse per clause so «на N дней» у сдвига не утечёт в duration create
-    clauses = _split_intent_clauses(raw_text) or [raw_text]
-    for clause in clauses:
-        if not re.search(r"(добав\w*|созда\w*|нужна\s+новая\s+задач)", clause, re.I):
-            continue
-        # Полный план с нуля / «как считаешь» — не rules-create, пусть LLM
-        if re.search(
-            r"(план\s+с\s+нуля|создай\s+план|как\s+считаешь|создавай\s+вс[её])",
-            clause,
-            re.I,
-        ):
-            continue
-        create_op = _parse_create(db, plan, clause)
-        if not create_op or create_placement_issues([create_op]):
-            job.provider = "rules"
-            job.model = "clarify_create"
-            _finish_direct(
-                db,
-                job,
-                plan,
-                summary=CLARIFY_CREATE_PLACEMENT,
-                changes=[],
-                ok=True,
-                meta_extra={"awaiting_confirm": "create_placement"},
+    # Create: parse per clause so «на N дней» у сдвига не утечёт в duration create.
+    # Полный план («создай реалистичный план…») — только LLM, не rules-clarify.
+    if not FULL_PLAN_RE.search(raw_text or ""):
+        clauses = _split_intent_clauses(raw_text) or [raw_text]
+        for clause in clauses:
+            if not re.search(r"(добав\w*|созда\w*|нужна\s+новая\s+задач)", clause, re.I):
+                continue
+            if FULL_PLAN_RE.search(clause):
+                continue
+            create_op = _parse_create(db, plan, clause)
+            # Не распарсили одиночную задачу — не блокируем LLM clarify'ем.
+            if not create_op:
+                continue
+            if create_placement_issues([create_op]):
+                job.provider = "rules"
+                job.model = "clarify_create"
+                _finish_direct(
+                    db,
+                    job,
+                    plan,
+                    summary=CLARIFY_CREATE_PLACEMENT,
+                    changes=[],
+                    ok=True,
+                    meta_extra={"awaiting_confirm": "create_placement"},
+                )
+                return True
+            operations.append(create_op)
+            bits.append(
+                f"Добавил задачу {create_op['code']} «{create_op['title']}» "
+                f"в {create_op['parent']} ({create_op['duration_days']} дн.)"
             )
-            return True
-        operations.append(create_op)
-        bits.append(
-            f"Добавил задачу {create_op['code']} «{create_op['title']}» "
-            f"в {create_op['parent']} ({create_op['duration_days']} дн.)"
-        )
 
     shifts = _parse_all_shifts(raw_text, default_code=default_code)
     for shift in shifts:
@@ -1434,6 +1444,7 @@ def run_agent_job(db: Session, job_id: int) -> None:
 
     def _rules_fallback() -> bool:
         """Built-in parsers for clear NL intents (prefer before LLM when possible)."""
+        nonlocal raw_text
         if _is_cancel(raw_text):
             # Cancel pending mass-delete confirmation
             for m in reversed(hist_preview):
@@ -1458,10 +1469,46 @@ def run_agent_job(db: Session, job_id: int) -> None:
 
         if _is_confirm(raw_text):
             last_user: str | None = None
+            last_asst: str | None = None
             for m in reversed(hist_preview):
-                if m["role"] == "user" and not _is_confirm(m["content"]):
+                if last_user is None and m["role"] == "user" and not _is_confirm(m["content"]):
                     last_user = m["content"]
+                if last_asst is None and m["role"] == "assistant":
+                    last_asst = m["content"]
+                if last_user is not None and last_asst is not None:
                     break
+            # «да» после вопроса о замене плана → очистить и отдать исходный запрос в LLM
+            if last_user and last_asst and re.search(
+                r"замен(ю|ить)\s+текущий\s+план|заменить\s+целиком|заменю\s+.*план",
+                last_asst,
+                re.I,
+            ):
+                from backend.app.services.plan_store import plan_to_dict
+
+                n = len((plan_to_dict(db, plan).get("tasks") or []))
+                if n:
+                    _run_tool(
+                        db,
+                        plan,
+                        "apply_plan_patch",
+                        {
+                            "operations": [{"op": "delete", "filter": {"all": True}}],
+                            "confirmed": True,
+                        },
+                        job=job,
+                        ctx={},
+                    )
+                    db.commit()
+                # История чата ещё про «старый» план — явно говорим, что уже пусто.
+                job.request_text = (
+                    f"{last_user}\n\n"
+                    "[Системно: пользователь подтвердил замену. План УЖЕ очищен (0 задач). "
+                    "Сразу get_plan_snapshot, затем один plan_commands + apply_plan_patch "
+                    "с полным WBS (фазы + листовые задачи + predecessors). "
+                    "Не спрашивай снова про замену и не пиши «готово» без apply.]"
+                )
+                raw_text = job.request_text
+                return False
             if last_user and _try_rule_mutations(
                 db,
                 job,
@@ -1520,10 +1567,25 @@ def run_agent_job(db: Session, job_id: int) -> None:
             f"Для импорта вызови import_excel_attachment.]"
         )
 
+    from backend.app.services.plan_store import plan_to_dict as _plan_to_dict
+
+    hist = _recent_chat_history(db, plan.id, job.id)
+    task_n = len((_plan_to_dict(db, plan).get("tasks") or []))
+    # Пустой план + «создай план»: история часто врёт («уже создано») — отключаем её.
+    if task_n == 0 and FULL_PLAN_RE.search(job.request_text or ""):
+        hist = []
+        user_content = (
+            f"{user_content}\n\n"
+            "[Системно: в плане сейчас 0 задач. История чата отключена как устаревшая. "
+            "Обязательно: get_plan_snapshot → plan_commands(полный WBS с фазами и "
+            "листовыми задачами + predecessors) → apply_plan_patch. "
+            "Не утверждай, что план уже создан, и не спрашивай про замену.]"
+        )
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
         *FEW_SHOT,
-        *_recent_chat_history(db, plan.id, job.id),
+        *hist,
         {"role": "user", "content": user_content},
     ]
 
