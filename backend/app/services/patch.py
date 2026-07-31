@@ -4,7 +4,43 @@ from copy import deepcopy
 from datetime import date, timedelta
 from typing import Any
 
+from backend.app.seed_data import compute_schedule
 from backend.app.services.validate import validate_plan_dict
+
+
+def _op_kind(op: dict[str, Any]) -> str:
+    return str(op.get("op") or op.get("type") or "").strip().lower()
+
+
+def _should_reschedule(ops: list[Any]) -> bool:
+    """Recompute FS dates after graph/duration changes (not after pure shift/reassign)."""
+    for op in ops or []:
+        if not isinstance(op, dict):
+            continue
+        kind = _op_kind(op)
+        if kind in ("create", "set_deps", "set_dependencies", "delete", "clear"):
+            return True
+        if kind == "update":
+            fields = dict(op.get("fields") or {})
+            if "duration_days" in op or "duration_days" in fields or "predecessors" in fields:
+                return True
+    return False
+
+
+def reschedule_plan_dict(plan: dict[str, Any]) -> dict[str, Any]:
+    """Set task start_date from predecessors (finish-to-start cascade)."""
+    tasks = plan.get("tasks") or []
+    if not tasks:
+        return plan
+    plan_start = date.fromisoformat(
+        plan.get("start_date") or date.today().isoformat()
+    )
+    starts = compute_schedule(tasks, plan_start)
+    for t in tasks:
+        code = t.get("code")
+        if code in starts:
+            t["start_date"] = starts[code].isoformat()
+    return plan
 
 
 def _matches_filter(task: dict[str, Any], filt: dict[str, Any] | None, by_code: dict) -> bool:
@@ -280,4 +316,6 @@ def apply_plan_patch_dict(
             'filter.all=true — весь план; filter.code / filter.codes; '
             'для фазы — filter.phase_code.'
         ]
+    if _should_reschedule(ops):
+        reschedule_plan_dict(working)
     return working, sorted(changes), []

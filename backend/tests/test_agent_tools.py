@@ -22,21 +22,40 @@ def test_plan_commands_ok_stores_ops(db, mini_plan):
     assert changes == []
 
 
-def test_plan_commands_over_limit_chunks_without_asking(db, mini_plan):
+def test_plan_commands_over_hard_limit(db, mini_plan):
     _user, plan = mini_plan
     ctx: dict = {"require_plan": True}
     ops = [
-        {"op": "shift", "filter": {"code": "T2.1"}, "days": i} for i in range(MAX_BATCH_OPS + 1)
+        {"op": "shift", "filter": {"code": "T2.1"}, "days": 1}
+        for _ in range(MAX_BATCH_OPS + 1)
     ]
     result, changes = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
     assert result["ok"] is False
-    assert result["need_chunking"] is True
-    assert result["need_clarification"] is False
+    assert result["need_clarification"] is True
     assert result["count"] == MAX_BATCH_OPS + 1
-    assert len(result["apply_now"]) == MAX_BATCH_OPS
-    assert len(result["remaining"]) == 1
     assert ctx.get("planned_ops") is None
     assert changes == []
+
+
+def test_plan_commands_rejects_phases_only(db, mini_plan):
+    _user, plan = mini_plan
+    ctx: dict = {"require_plan": True}
+    ops = [
+        {
+            "op": "create",
+            "code": f"P{i}",
+            "parent": None,
+            "position": "end",
+            "title": f"Phase {i}",
+            "duration_days": 5,
+            "predecessors": [f"P{i-1}"] if i > 1 else [],
+        }
+        for i in range(1, 5)
+    ]
+    result, _ = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
+    assert result["ok"] is False
+    assert result["reason"] == "cascade"
+    assert "листов" in (result.get("message") or "").lower() or result.get("errors")
 
 
 def test_plan_commands_allows_large_create_wbs(db, mini_plan):

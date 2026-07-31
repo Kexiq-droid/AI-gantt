@@ -58,12 +58,10 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
 3) Вызови plan_commands с полным списком operations (все части составного запроса).
 4) Смотри ответ plan_commands:
    - ok=true → СРАЗУ вызови apply_plan_patch с ТЕМ ЖЕ списком operations (весь список).
-   - need_chunking=true → НЕ спрашивай пользователя. apply_plan_patch(apply_now), затем
-     plan_commands(remaining) + apply, пока remaining не пуст.
    - need_confirmation / replace_plan → спроси «Заменю текущий план целиком? да/нет».
      После «да» — тот же operations с confirmed=true в plan_commands и apply_plan_patch.
    - need_clarification + reason=create_placement → спроси parent / after|position / predecessors.
-   - need_clarification + reason=cascade → пересобери WBS со смешанным каскадом.
+   - need_clarification + reason=cascade → пересобери полный WBS (фазы + листья + deps) и apply сразу.
 5) После apply ответь по факту changes. Для нового плана — кратко: что последовательно, что параллельно.
 
 ДОБАВЛЕНИЕ ОДНОЙ / НЕСКОЛЬКИХ ЗАДАЧ (не весь план с нуля):
@@ -78,21 +76,23 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
 - get_plan_snapshot. Если план не пуст — спроси ОДИН раз: заменить целиком? После «да» —
   operations = [delete filter.all] + полный WBS, plan_commands(..., confirmed=true) и
   apply_plan_patch(..., confirmed=true). Не спрашивай повторно.
-- Строй РЕАЛЬНЫЙ смешанный каскад (не чистый waterfall):
-  фазы P* + листовые T*.* с duration_days; критический путь — последовательно (predecessors);
-  независимые по технологии работы — параллельно (общий predecessor или []).
-  Анализируй технологию процесса (что блокирует что), не ресурсы.
-- Минимум 2–5 реальных задач на фазу. НЕ создавай пустые фазы без детей.
-- Весь WBS одним plan_commands + одним apply. Не дроби «по 3», не спрашивай «создать эти 3?».
-- В финальном ответе: 1–2 предложения «последовательно: … / параллельно: …».
-- Не пиши «готово, полный план», если на Ганте только фазы без листовых задач.
+- СРАЗУ выполни план целиком: один plan_commands + один apply_plan_patch.
+  ЗАПРЕЩЕНО говорить про «лимит», «по 3», «за шаг», «начнём с первых трёх», «создать эти 3?».
+- В одном batch: фазы P* + листовые T*.* (минимум 2–5 на фазу) + duration_days + predecessors.
+  НЕ создавай сначала одни фазы, потом отдельно задачи.
+- Каскад по технологии: критический путь — цепочка predecessors (ватерфол на Ганте);
+  параллельно только независимые работы. Даты старта пересчитает система по deps —
+  не выставляй всем один start_date.
+- Если пользователь просит «ватерфол» / «строго последовательно» — у каждой следующей
+  задачи predecessors=[предыдущая], без параллелизма.
+- В финальном ответе: 1–2 предложения «последовательно: … / параллельно: …» (или «чистый ватерфол»).
+- Не пиши «готово», если на Ганте только фазы без листовых задач.
 
 ЗАПРЕЩЕНО:
 - Вызывать apply_plan_patch без предварительного plan_commands в этом же ходе.
-- Применять только первую часть составного запроса (кроме явного чанкинга по need_chunking).
+- Применять только часть составного запроса / дробить план на батчи «по 3».
 - Писать «готово», если не было успешного apply_plan_patch / import_excel_attachment.
-- Спрашивать «создать эти 3?» / дробить создание плана по лимиту 3, если пользователь уже
-  попросил создать план или сказал «все» / «создавай».
+- Упоминать лимит операций или спрашивать разрешение создать часть задач.
 - Создавать одиночную задачу без уточнения места, если parent/позиция/deps не заданы.
 - Задавать лишние уточнения, если смысл однозначен —
   ИСКЛЮЧЕНИЕ: массовое удаление / замена плана — сначала «да».
@@ -1110,11 +1110,10 @@ TOOLS = [
             "description": (
                 "Шаг анализа: разложить ВЕСЬ запрос на operations БЕЗ применения. "
                 "Обязателен перед apply_plan_patch. "
-                "Одиночный create: нужны parent + after|position + predecessors "
-                "(иначе need_clarification create_placement). "
-                "Сборка плана create+set_deps+update — большой список со смешанным каскадом. "
-                "Замена плана: [delete all]+WBS с confirmed=true после «да» пользователя. "
-                f"Прочие правки >{MAX_BATCH_OPS}: need_chunking (apply_now/remaining). "
+                "Одиночный create: нужны parent + after|position + predecessors. "
+                "Новый план: весь WBS сразу (фазы + листовые задачи + predecessors) — "
+                "не дроби и не спрашивай пользователя. "
+                "Замена плана: [delete all]+WBS с confirmed=true после «да». "
                 'Сдвиг всего плана = одна shift filter.all.'
             ),
             "parameters": {
@@ -1146,8 +1145,8 @@ TOOLS = [
         "function": {
             "name": "apply_plan_patch",
             "description": (
-                "Применить патч атомарно. Для сборки плана — весь список из plan_commands. "
-                f"Прочие правки: лимит {MAX_BATCH_OPS}; при need_chunking бери apply_now. "
+                "Применить патч атомарно. Передавай весь список из plan_commands целиком. "
+                "После create/set_deps даты старта пересчитаются по predecessors (каскад на Ганте). "
                 "dry_run=true — превью. "
                 "Массовое удаление / замена плана: только после «да», confirmed=true."
             ),
@@ -1612,13 +1611,8 @@ def run_agent_job(db: Session, job_id: int) -> None:
             break
 
         if not final_text:
-            if tool_ctx.get("need_clarification"):
+            if tool_ctx.get("need_clarification") and not all_changes:
                 final_text = CLARIFY_OVER_LIMIT
-            elif tool_ctx.get("need_chunking") and not all_changes:
-                final_text = (
-                    "План большой — продолжаю чанками. Напишите «продолжай», "
-                    "если следующий шаг не применился."
-                )
             elif all_changes:
                 final_text = f"Готово. Изменены задачи: {', '.join(sorted(set(all_changes)))}."
             else:

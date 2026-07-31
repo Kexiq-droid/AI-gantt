@@ -260,6 +260,41 @@ def test_create_task_after_sets_sort_order():
     assert by["T1.2"]["sort_order"] == by["T1.1"]["sort_order"] + 1
 
 
+def test_create_with_predecessors_reschedules_waterfall():
+    plan = _base_plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan,
+        {
+            "operations": [
+                {
+                    "op": "create",
+                    "code": "T1.2",
+                    "parent": "P1",
+                    "position": "end",
+                    "title": "Second",
+                    "duration_days": 4,
+                    "predecessors": ["T1.1"],
+                    "start_date": "2026-03-01",  # same day trap — must be overwritten
+                },
+                {
+                    "op": "create",
+                    "code": "T1.3",
+                    "parent": "P1",
+                    "position": "end",
+                    "title": "Third",
+                    "duration_days": 2,
+                    "predecessors": ["T1.2"],
+                    "start_date": "2026-03-01",
+                },
+            ]
+        },
+    )
+    assert not errors
+    by = {t["code"]: t for t in new_plan["tasks"]}
+    assert by["T1.2"]["start_date"] > by["T1.1"]["start_date"]
+    assert by["T1.3"]["start_date"] > by["T1.2"]["start_date"]
+
+
 def test_set_deps():
     plan = _base_plan()
     new_plan, changes, errors = apply_plan_patch_dict(

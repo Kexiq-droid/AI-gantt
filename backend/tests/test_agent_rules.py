@@ -233,15 +233,14 @@ def test_responsible_reassign_with_branch_context():
     assert by["P2"]["assignee"] == "Смирнов"
 
 
-def test_ops_limit_requires_clarification():
+def test_ops_limit_hard_cap():
     from backend.app.services.agent import MAX_BATCH_OPS, _ops_limit_result
 
     ok = _ops_limit_result([{"op": "shift"}] * MAX_BATCH_OPS)
     assert ok is None
     over = _ops_limit_result([{"op": "shift"}] * (MAX_BATCH_OPS + 1))
     assert over is not None
-    assert over["need_chunking"] is True
-    assert over["need_clarification"] is False
+    assert over["need_clarification"] is True
     assert over["count"] == MAX_BATCH_OPS + 1
     creates = [
         {"op": "create", "code": f"T8.{i}", "title": f"t{i}", "duration_days": 1}

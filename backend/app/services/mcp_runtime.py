@@ -22,21 +22,15 @@ from backend.app.services.plan_store import (
 )
 from backend.app.services.validate import validate_plan_dict
 
-MAX_BATCH_OPS = 3
-# Полный WBS (create + deps) часто >3 ops — пропускаем soft-лимит до этого потолка.
-MAX_PLAN_BUILD_OPS = 60
+# Один лимит на apply — агент должен отдавать весь план целиком, без «по 3».
+MAX_BATCH_OPS = 60
+MAX_PLAN_BUILD_OPS = MAX_BATCH_OPS
 _PLAN_BUILD_KINDS = frozenset({"create", "set_deps", "update"})
 
 CLARIFY_OVER_LIMIT = (
-    "В запросе больше 3 отдельных действий. Уточните, какие 1–3 выполнить сейчас "
-    "(остальные сделаем следующим сообщением)."
-)
-
-CHUNK_OVER_LIMIT = (
-    "Операций больше лимита batch. НЕ спрашивай пользователя. "
-    "Сразу вызови apply_plan_patch с полем apply_now из ответа, затем снова "
-    "plan_commands с remaining и apply — пока remaining не пуст. "
-    "В конце одним сообщением резюмируй всё сделанное."
+    f"Слишком много операций за один раз (больше {MAX_BATCH_OPS}). "
+    "Сократи WBS или разбей на два логических этапа (например, фазы 1–4, затем 5–7), "
+    "но каждый этап применяй целиком с листовыми задачами — не по одной задаче."
 )
 
 MASS_DELETE_NEED_CONFIRM = (
@@ -159,18 +153,29 @@ def create_placement_issues(operations: list[Any]) -> list[dict[str, Any]]:
 
 
 def plan_build_cascade_issues(operations: list[Any]) -> list[str]:
-    """Require mixed cascade: some sequential deps among leaf creates."""
+    """Require real WBS: leaf tasks + technological deps (not phases-only)."""
     creates = [
         op for op in (operations or []) if isinstance(op, dict) and _op_kind(op) == "create"
     ]
     leaves = [op for op in creates if op.get("parent")]
+    phases = [
+        op
+        for op in creates
+        if not op.get("parent") and _is_phase_code(op.get("code"))
+    ]
+    if len(phases) >= 2 and len(leaves) == 0:
+        return [
+            "Нельзя создавать только фазы без листовых задач. "
+            "В том же списке operations добавь задачи T* с duration_days и predecessors, "
+            "затем один apply_plan_patch на весь WBS. Не дроби и не спрашивай пользователя."
+        ]
     if len(leaves) < 2:
         return []
     with_deps = [op for op in leaves if list(op.get("predecessors") or [])]
     if not with_deps:
         return [
-            "У листовых задач нет predecessors — нужен смешанный каскад "
-            "(последовательные работы + параллельные где технология позволяет)."
+            "У листовых задач нет predecessors — нужен каскад по технологии работ "
+            "(последовательные зависимости; параллельно только независимые работы)."
         ]
     return []
 
@@ -228,37 +233,18 @@ MCP_PUBLIC_TOOLS = frozenset(
 
 
 def ops_limit_result(operations: list[Any]) -> dict[str, Any] | None:
-    """If over limit, return chunking/clarification payload; else None (allow)."""
+    """If over hard cap, return error payload; else None (allow full list)."""
     ops = list(operations or [])
     n = len(ops)
     if n <= MAX_BATCH_OPS:
         return None
-    # Полный план с задачами/зависимостями — один атомарный apply.
-    if _is_plan_build_ops(ops) and n <= MAX_PLAN_BUILD_OPS:
-        return None
-    if _is_plan_build_ops(ops) and n > MAX_PLAN_BUILD_OPS:
-        return {
-            "ok": False,
-            "need_clarification": True,
-            "need_chunking": False,
-            "count": n,
-            "max": MAX_PLAN_BUILD_OPS,
-            "message": (
-                f"Слишком большой план ({n} операций, максимум {MAX_PLAN_BUILD_OPS}). "
-                "Сократи WBS или разбей на два запроса (сначала фазы 1–N с задачами)."
-            ),
-            "operations_preview": ops[:8],
-        }
-    # Прочие правки >3: чанки без вопроса пользователю (не блокируем «создай всё»).
     return {
         "ok": False,
-        "need_clarification": False,
-        "need_chunking": True,
+        "need_clarification": True,
+        "need_chunking": False,
         "count": n,
         "max": MAX_BATCH_OPS,
-        "message": CHUNK_OVER_LIMIT,
-        "apply_now": ops[:MAX_BATCH_OPS],
-        "remaining": ops[MAX_BATCH_OPS:],
+        "message": CLARIFY_OVER_LIMIT,
         "operations_preview": ops[:8],
     }
 

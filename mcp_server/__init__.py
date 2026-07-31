@@ -93,9 +93,9 @@ def validate_plan() -> str:
 @mcp.tool()
 def apply_plan_patch(operations_json: str, dry_run: bool = False) -> str:
     """
-    Apply plan patch. Create/set_deps/update (building a WBS) may exceed 3 ops;
-    other edits are limited to 3 per call (chunk via plan_commands). operations_json:
-    JSON array or {"operations": [...]}. dry_run=true previews without writing.
+    Apply plan patch (up to 60 operations). Pass the full WBS in one call.
+    operations_json: JSON array or {"operations": [...]}. dry_run=true previews
+    without writing. start_date is recomputed from predecessors after create/deps.
     """
     raw = json.loads(operations_json)
     ops = raw if isinstance(raw, list) else raw.get("operations") or []

@@ -20,22 +20,22 @@ def test_dry_run_does_not_mutate(db, mini_plan):
     assert after["tasks"][0]["start_date"] == before["tasks"][0]["start_date"]
 
 
-def test_apply_over_limit_chunks(db, mini_plan):
+def test_apply_over_hard_limit(db, mini_plan):
     _user, plan = mini_plan
     ops = [{"op": "shift", "filter": {"code": "T2.1"}, "days": 1}] * (MAX_BATCH_OPS + 1)
     result, changes = execute_tool(db, plan, "apply_plan_patch", {"operations": ops})
-    assert result["need_chunking"] is True
-    assert result["need_clarification"] is False
+    assert result["need_clarification"] is True
     assert changes == []
 
 
-def test_apply_large_create_wbs(db, mini_plan):
+def test_apply_large_create_wbs_schedules_cascade(db, mini_plan):
     _user, plan = mini_plan
     ops = [
         {
             "op": "create",
             "code": f"TX.{i}",
             "parent": "P2",
+            "position": "end",
             "title": f"Leaf {i}",
             "duration_days": 3,
             "predecessors": [f"TX.{i-1}"] if i > 1 else ["T2.1"],
@@ -49,8 +49,11 @@ def test_apply_large_create_wbs(db, mini_plan):
     assert len(changes) == 5
     db.commit()
     snap = plan_to_dict(db, plan)
-    codes = {t["code"] for t in snap["tasks"]}
-    assert {"TX.1", "TX.5"} <= codes
+    by = {t["code"]: t for t in snap["tasks"]}
+    assert {"TX.1", "TX.5"} <= set(by)
+    # Waterfall: each next leaf starts after previous ends (not one column)
+    assert by["TX.2"]["start_date"] > by["TX.1"]["start_date"]
+    assert by["TX.5"]["start_date"] > by["TX.4"]["start_date"]
 
 
 def test_undo_plan_tool(db, mini_plan):
