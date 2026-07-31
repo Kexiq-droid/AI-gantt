@@ -25,7 +25,7 @@ from backend.app.services.validate import validate_plan_dict
 # Один лимит на apply — агент должен отдавать весь план целиком, без «по 3».
 MAX_BATCH_OPS = 60
 MAX_PLAN_BUILD_OPS = MAX_BATCH_OPS
-_PLAN_BUILD_KINDS = frozenset({"create", "set_deps", "update"})
+_PLAN_BUILD_KINDS = frozenset({"create", "set_deps", "update", "set_title", "rename_plan"})
 
 CLARIFY_OVER_LIMIT = (
     f"Слишком много операций за один раз (больше {MAX_BATCH_OPS}). "
@@ -109,6 +109,54 @@ def _is_plan_build_ops(operations: list[Any]) -> bool:
 def _is_phase_code(code: Any) -> bool:
     s = str(code or "").strip()
     return bool(s) and s[0] in "Pp" and s[1:].isdigit()
+
+
+def title_from_user_request(text: str) -> str | None:
+    """Derive a short plan title from a «создай план …» user message."""
+    import re
+
+    t = (text or "").strip()
+    t = re.sub(r"\[Системно:.*?\]", "", t, flags=re.DOTALL).strip()
+    if not t:
+        return None
+    # Drop leading create-verbs
+    t = re.sub(
+        r"^(?:пожалуйста[, ]*)?(?:создай|создать|построй|собери|сгенерируй|сделай)\s+",
+        "",
+        t,
+        flags=re.IGNORECASE,
+    ).strip()
+    t = re.sub(r"\s+", " ", t).strip(" .")
+    if len(t) < 8:
+        return None
+    if t[0].islower():
+        t = t[0].upper() + t[1:]
+    return t[:200]
+
+
+def resolve_plan_title(
+    operations: list[Any],
+    args: dict[str, Any] | None = None,
+    *,
+    job: AgentJob | None = None,
+) -> str | None:
+    """Title from set_title op, plan_title/analysis args, or user request."""
+    args = args or {}
+    for op in operations or []:
+        if isinstance(op, dict) and _op_kind(op) in ("set_title", "rename_plan"):
+            t = (op.get("title") or "").strip()
+            if t:
+                return t[:200]
+    for key in ("plan_title", "title"):
+        t = str(args.get(key) or "").strip()
+        if t:
+            return t[:200]
+    analysis = str(args.get("analysis") or "").strip()
+    if 8 <= len(analysis) <= 160:
+        return analysis[:200]
+    if job is not None:
+        return title_from_user_request(getattr(job, "request_text", "") or "")
+    return None
 
 
 def _create_has_parent(op: dict[str, Any]) -> bool:
@@ -368,10 +416,17 @@ def execute_tool(
             ctx["need_clarification"] = bool(limited.get("need_clarification"))
             ctx["need_chunking"] = bool(limited.get("need_chunking"))
             return limited, []
+        build = _is_plan_build_ops(operations)
+        plan_title = resolve_plan_title(operations, args, job=job) if build else None
+        if build and plan_title and not any(
+            isinstance(o, dict) and _op_kind(o) in ("set_title", "rename_plan")
+            for o in operations
+        ):
+            operations = [{"op": "set_title", "title": plan_title}, *list(operations)]
         ctx["planned_ops"] = operations
         ctx["need_clarification"] = False
         ctx["need_chunking"] = False
-        build = _is_plan_build_ops(operations)
+        ctx["plan_title"] = plan_title
         return {
             "ok": True,
             "need_clarification": False,
@@ -379,6 +434,7 @@ def execute_tool(
             "count": len(operations),
             "max": MAX_PLAN_BUILD_OPS if build else MAX_BATCH_OPS,
             "plan_build": build,
+            "plan_title": plan_title,
             "analysis": (args.get("analysis") or "")[:500],
             "operations": operations,
             "next": "Вызови apply_plan_patch с этим же списком operations (весь список).",
@@ -422,18 +478,29 @@ def execute_tool(
                     "Сначала вызови plan_commands с полным списком операций, затем apply_plan_patch."
                 ],
             }, []
+        # Если LLM не вернул set_title из plan_commands — добавим из plan_title/запроса.
+        build = _is_plan_build_ops(operations)
+        plan_title = resolve_plan_title(operations, args, job=job) if build else None
+        if build and plan_title and not any(
+            isinstance(o, dict) and _op_kind(o) in ("set_title", "rename_plan")
+            for o in operations
+        ):
+            operations = [{"op": "set_title", "title": plan_title}, *list(operations)]
         current = plan_to_dict(db, plan)
         new_plan, changes, errors = apply_plan_patch_dict(
             current, {"operations": operations}, changed_by="agent"
         )
         if errors:
             return {"ok": False, "errors": errors, "changes": [], "dry_run": dry_run}, []
+        if plan_title:
+            new_plan["title"] = plan_title
         if dry_run:
             return {
                 "ok": True,
                 "dry_run": True,
                 "errors": [],
                 "changes": changes,
+                "plan_title": new_plan.get("title"),
                 "message": "Превью: план не изменён. Вызови apply_plan_patch без dry_run для записи.",
             }, []
         push_snapshot(db, plan, source="agent")
@@ -443,7 +510,15 @@ def execute_tool(
 
         sync_assignees_from_tasks(db, plan)
         ctx["applied"] = True
-        return {"ok": True, "dry_run": False, "errors": [], "changes": changes}, changes
+        # Не отдаём служебный маркер __title__ в changes клиенту
+        public_changes = [c for c in changes if c != "__title__"]
+        return {
+            "ok": True,
+            "dry_run": False,
+            "errors": [],
+            "changes": public_changes,
+            "plan_title": plan.title,
+        }, public_changes
 
     if name == "undo_plan":
         ok = restore_snapshot(db, plan)

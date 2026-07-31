@@ -80,6 +80,9 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
   ЗАПРЕЩЕНО говорить про «лимит», «по 3», «за шаг», «начнём с первых трёх», «создать эти 3?».
 - В одном batch: фазы P* + листовые T*.* (минимум 2–5 на фазу) + duration_days + predecessors.
   НЕ создавай сначала одни фазы, потом отдельно задачи.
+- Обязательно переименуй план: первая операция
+  {{"op":"set_title","title":"…"}} (короткое имя по смыслу запроса, не оставляй старый
+  заголовок вроде VAX-B) и/или передай plan_title в plan_commands.
 - Каскад по технологии: критический путь — цепочка predecessors (ватерфол на Ганте);
   параллельно только независимые работы. Даты старта пересчитает система по deps —
   не выставляй всем один start_date.
@@ -131,6 +134,7 @@ SYSTEM_PROMPT = f"""Ты — ассистент планирования BioPlan
 - {{"op":"create","code":"T2.9","parent":"P2","after":"T2.3","title":"...","duration_days":5,"predecessors":["T2.3"]}}
 - {{"op":"create","code":"T2.10","parent":"P2","position":"end","title":"...","duration_days":4,"predecessors":[]}}
 - {{"op":"create","code":"P1","parent":null,"position":"end","title":"Фаза","duration_days":10,"predecessors":[]}}
+- {{"op":"set_title","title":"Ремонт квартиры 100 м²: черновая → заселение"}}
 - {{"op":"set_deps","code":"T3.1","predecessors":["T2.4"]}}
 - {{"op":"delete","code":"T4.3"}}
 - {{"op":"delete","filter":{{"all":true}}}}
@@ -1126,7 +1130,7 @@ TOOLS = [
                 "Шаг анализа: разложить ВЕСЬ запрос на operations БЕЗ применения. "
                 "Обязателен перед apply_plan_patch. "
                 "Одиночный create: нужны parent + after|position + predecessors. "
-                "Новый план: весь WBS сразу (фазы + листовые задачи + predecessors) — "
+                "Новый план: весь WBS сразу (фазы + листовые + predecessors + set_title) — "
                 "не дроби и не спрашивай пользователя. "
                 "Замена плана: [delete all]+WBS с confirmed=true после «да». "
                 'Сдвиг всего плана = одна shift filter.all.'
@@ -1137,6 +1141,13 @@ TOOLS = [
                     "analysis": {
                         "type": "string",
                         "description": "Кратко, что понял из запроса (1–2 предложения).",
+                    },
+                    "plan_title": {
+                        "type": "string",
+                        "description": (
+                            "Новое название плана для шапки Ганта (обязательно при создании "
+                            "плана с нуля / замене). Пример: «Ремонт квартиры 100 м²»."
+                        ),
                     },
                     "operations": {
                         "type": "array",

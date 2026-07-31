@@ -72,12 +72,70 @@ def test_plan_commands_allows_large_create_wbs(db, mini_plan):
         }
         for i in range(1, 8)
     ]
-    result, changes = _run_tool(db, plan, "plan_commands", {"operations": ops}, ctx=ctx)
+    result, changes = _run_tool(
+        db,
+        plan,
+        "plan_commands",
+        {"operations": ops, "plan_title": "Доп. работы P2"},
+        ctx=ctx,
+    )
     assert result["ok"] is True
     assert result["plan_build"] is True
-    assert result["count"] == 7
-    assert ctx["planned_ops"] == ops
+    assert result["plan_title"] == "Доп. работы P2"
+    assert ctx["planned_ops"][0]["op"] == "set_title"
+    assert ctx["planned_ops"][0]["title"] == "Доп. работы P2"
+    assert len(ctx["planned_ops"]) == 8
     assert changes == []
+
+
+def test_apply_plan_build_renames_title(db, mini_plan):
+    from backend.app.models import AgentJob
+
+    _user, plan = mini_plan
+    assert "VAX" in plan.title or "Mini" in plan.title or plan.title
+    old_title = plan.title
+    ctx: dict = {"require_plan": True}
+    job = AgentJob(
+        plan_id=plan.id,
+        status="running",
+        request_text="создай реалистичный план ремонта квартиры на 100м2",
+    )
+    db.add(job)
+    db.flush()
+    ops = [
+        {
+            "op": "create",
+            "code": f"T9.{i}",
+            "parent": "P2",
+            "position": "end",
+            "title": f"Work {i}",
+            "duration_days": 2,
+            "predecessors": [f"T9.{i-1}"] if i > 1 else ["T2.1"],
+        }
+        for i in range(1, 4)
+    ]
+    planned, _ = _run_tool(
+        db,
+        plan,
+        "plan_commands",
+        {"operations": ops, "plan_title": "Ремонт квартиры 100 м²"},
+        job=job,
+        ctx=ctx,
+    )
+    assert planned["ok"] is True
+    result, _ = _run_tool(
+        db,
+        plan,
+        "apply_plan_patch",
+        {"operations": planned["operations"]},
+        job=job,
+        ctx=ctx,
+    )
+    assert result["ok"] is True
+    db.commit()
+    db.refresh(plan)
+    assert plan.title == "Ремонт квартиры 100 м²"
+    assert plan.title != old_title
 
 
 def test_plan_commands_create_needs_placement(db, mini_plan):

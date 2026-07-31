@@ -284,6 +284,14 @@ def apply_plan_patch_dict(
                 tasks.clear()
                 by_code.clear()
                 changes.update(removed)
+            elif kind in ("set_title", "rename_plan"):
+                title = (op.get("title") or "").strip()
+                if not title:
+                    raise ValueError("set_title: укажите непустой title")
+                title = title[:200]
+                if working.get("title") != title:
+                    working["title"] = title
+                    changes.add("__title__")
             else:
                 raise ValueError(f"Неизвестная операция: {kind}")
     except Exception as exc:  # noqa: BLE001
@@ -307,6 +315,8 @@ def apply_plan_patch_dict(
             "swap",
             "swap_order",
             "swap_places",
+            "set_title",
+            "rename_plan",
         }
         for op in ops
     )

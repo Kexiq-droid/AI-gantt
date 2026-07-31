@@ -260,6 +260,17 @@ def test_create_task_after_sets_sort_order():
     assert by["T1.2"]["sort_order"] == by["T1.1"]["sort_order"] + 1
 
 
+def test_set_title_renames_plan():
+    plan = _base_plan()
+    new_plan, changes, errors = apply_plan_patch_dict(
+        plan,
+        {"operations": [{"op": "set_title", "title": "Ремонт квартиры 100 м²"}]},
+    )
+    assert not errors
+    assert new_plan["title"] == "Ремонт квартиры 100 м²"
+    assert "__title__" in changes
+
+
 def test_create_with_predecessors_reschedules_waterfall():
     plan = _base_plan()
     new_plan, changes, errors = apply_plan_patch_dict(
